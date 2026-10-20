@@ -54,7 +54,34 @@ pub(super) fn read_endpoint() -> Option<Endpoint> {
 }
 
 fn read_endpoint_from(path: PathBuf) -> Option<Endpoint> {
-    let data = std::fs::read_to_string(path).ok()?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() || metadata.len() > 256 {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        // Inspect and repair the same open inode, never a raced pathname.
+        if metadata.uid() != unsafe { libc::geteuid() } || metadata.nlink() != 1 {
+            return None;
+        }
+        if metadata.permissions().mode() & 0o777 != 0o600 {
+            file.set_permissions(std::fs::Permissions::from_mode(0o600)).ok()?;
+        }
+    }
+    let mut data = String::new();
+    file.take(257).read_to_string(&mut data).ok()?;
+    if data.len() > 256 {
+        return None;
+    }
     parse_endpoint(&data)
 }
 
@@ -62,18 +89,10 @@ pub(super) fn endpoint_addr(endpoint: &Endpoint) -> SocketAddr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, endpoint.port))
 }
 
-fn fresh_token() -> String {
-    use std::hash::{BuildHasher, Hasher, RandomState};
-    let mut a = RandomState::new().build_hasher();
-    let mut b = RandomState::new().build_hasher();
-    a.write_u32(std::process::id());
-    b.write_u128(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
-            .unwrap_or(0),
-    );
-    format!("{:016x}{:016x}", a.finish(), b.finish())
+fn fresh_token() -> Option<String> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).ok()?;
+    Some(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 /// 普通二次启动并入驻留实例：先恢复/聚焦窗口，再新建一个默认 shell 标签页。
@@ -222,12 +241,11 @@ impl RuntimeServer {
         }
 
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).ok()?;
-        let endpoint = Endpoint { port: listener.local_addr().ok()?.port(), token: fresh_token() };
+        let endpoint = Endpoint { port: listener.local_addr().ok()?.port(), token: fresh_token()? };
         let contents = format!("{} {} {}\n", endpoint.port, endpoint.token, PROTOCOL_VERSION);
-        if path
-            .as_ref()
-            .is_some_and(|path| crate::atomic_file::write(path, contents.as_bytes()).is_err())
-        {
+        if path.as_ref().is_some_and(|path| {
+            crate::atomic_file::write_private(path, contents.as_bytes()).is_err()
+        }) {
             warn!("Runtime API: cannot write {path:?}; control plane disabled");
             return None;
         }
@@ -306,5 +324,34 @@ mod tests {
         drop(server);
         apply_child_endpoint(&mut env);
         assert!(!env.contains_key(ENDPOINT_ENV));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_repairs_legacy_permissions_but_rejects_links() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runtime.port");
+        std::fs::write(&path, "12345 0123456789abcdef0123456789abcdef 1\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(read_endpoint_from(path.clone()).is_some());
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        let link = dir.path().join("linked.port");
+        symlink(&path, &link).unwrap();
+        assert!(read_endpoint_from(link).is_none());
+        let hard = dir.path().join("hard.port");
+        std::fs::hard_link(&path, &hard).unwrap();
+        assert!(read_endpoint_from(hard).is_none());
+    }
+
+    #[test]
+    fn discovery_rejects_oversized_records_and_tokens_use_wire_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runtime.port");
+        std::fs::write(&path, "x".repeat(257)).unwrap();
+        assert!(read_endpoint_from(path).is_none());
+        let first = fresh_token().unwrap();
+        assert_ne!(first, fresh_token().unwrap());
+        assert!(parse_endpoint(&format!("12345 {first}")).is_some());
     }
 }

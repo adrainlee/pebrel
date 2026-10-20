@@ -14,6 +14,15 @@ static NEXT_TEMPORARY: AtomicU64 = AtomicU64::new(1);
 
 /// Atomically replace `path` with `contents`, syncing the temporary file first.
 pub(crate) fn write(path: &Path, contents: &[u8]) -> io::Result<()> {
+    write_with_privacy(path, contents, false)
+}
+
+/// Credentials are private from creation, including the pre-rename temporary file.
+pub(crate) fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
+    write_with_privacy(path, contents, true)
+}
+
+fn write_with_privacy(path: &Path, contents: &[u8], private: bool) -> io::Result<()> {
     let parent = path.parent().ok_or_else(|| io::Error::other("state path has no parent"))?;
     std::fs::create_dir_all(parent)?;
 
@@ -23,7 +32,16 @@ pub(crate) fn write(path: &Path, contents: &[u8]) -> io::Result<()> {
         parent.join(format!(".{file_name}.nebula-tmp-{}-{sequence}", std::process::id()));
 
     let result = (|| {
-        let mut file = OpenOptions::new().write(true).create_new(true).open(&temporary)?;
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        if private {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        #[cfg(not(unix))]
+        let _ = private; // Windows inherits the user's application-directory ACL.
+        let mut file = options.open(&temporary)?;
         file.write_all(contents)?;
         file.sync_all()?;
         drop(file);
@@ -208,5 +226,19 @@ mod tests {
         assert!(try_lifetime_lock(&path).unwrap().is_none());
         drop(owner);
         assert!(try_lifetime_lock(&path).unwrap().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_atomic_replacement_does_not_inherit_public_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credential");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        super::write_private(&path, b"new").unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 }

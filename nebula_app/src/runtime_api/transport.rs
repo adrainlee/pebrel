@@ -8,12 +8,12 @@ pub(super) fn serve(listener: TcpListener, token: String, sink: EventSink, hub: 
             active.fetch_sub(1, Ordering::AcqRel);
             continue;
         }
-        let active = active.clone();
+        let guard = ActiveClient(active.clone());
         let token = token.clone();
         let sink = sink.clone();
         let hub = hub.clone();
         let _ = std::thread::Builder::new().name("nebula-runtime-client".into()).spawn(move || {
-            let _guard = ActiveClient(active);
+            let _guard = guard;
             if let Err(error) = handle_connection(stream, &token, &sink, &hub) {
                 log::debug!("Runtime API client disconnected: {error}");
             }
@@ -37,7 +37,10 @@ pub(super) fn handle_connection(
 ) -> Result<(), IoError> {
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
-    let reader = BufReader::new(stream.try_clone()?);
+    let reader = BufReader::new(RequestReader {
+        stream: stream.try_clone()?,
+        deadline: Instant::now() + IO_TIMEOUT,
+    });
     let mut limited = reader.take((MAX_REQUEST_BYTES + 1) as u64);
     let mut line = String::new();
     limited.read_line(&mut line)?;
@@ -257,6 +260,7 @@ pub(super) fn subscribe_connection(
         Err(error) => return write_response(stream, &ApiResponse::failure(request.id, error)),
     };
     let (subscription_id, current, receiver) = hub.subscribe();
+    let _subscription = Subscription { hub, id: subscription_id };
     write_response(
         stream,
         &ApiResponse::success(
@@ -267,16 +271,43 @@ pub(super) fn subscribe_connection(
             }),
         ),
     )?;
-    stream.set_write_timeout(None)?;
+    stream.set_write_timeout(Some(IO_TIMEOUT))?;
     if let Some(snapshot) = current
         && params.since_revision.is_none_or(|revision| snapshot.revision > revision)
     {
         write_json_line(stream, &ApiEvent::snapshot(snapshot))?;
     }
-    while let Ok(snapshot) = receiver.recv() {
-        write_json_line(stream, &ApiEvent::snapshot(snapshot))?;
+    loop {
+        match receiver.recv_timeout(Duration::from_millis(250)) {
+            Ok(snapshot) => write_json_line(stream, &ApiEvent::snapshot(snapshot))?,
+            Err(RecvTimeoutError::Disconnected) => return Ok(()),
+            Err(RecvTimeoutError::Timeout) => {
+                // Detect FIN even while the workspace has no new snapshots.
+                stream.set_read_timeout(Some(Duration::from_millis(1)))?;
+                match stream.peek(&mut [0u8; 1]) {
+                    Ok(0) => return Ok(()),
+                    Ok(_) => return Err(IoError::other("unexpected data after subscription")),
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) => {},
+                    Err(error) => return Err(error),
+                }
+            },
+        }
     }
-    Ok(())
+}
+
+struct Subscription<'a> {
+    hub: &'a RuntimeHub,
+    id: u64,
+}
+
+impl Drop for Subscription<'_> {
+    fn drop(&mut self) {
+        self.hub.lock().subscribers.retain(|(id, _)| *id != self.id);
+    }
 }
 
 pub(super) fn wait_connection(
@@ -562,7 +593,56 @@ pub(super) fn write_json_line<T: Serialize>(
     stream: &mut TcpStream,
     value: &T,
 ) -> Result<(), IoError> {
-    serde_json::to_writer(&mut *stream, value).map_err(IoError::other)?;
-    stream.write_all(b"\n")?;
-    stream.flush()
+    write_json_line_until(stream, value, Instant::now() + IO_TIMEOUT)
 }
+
+fn write_json_line_until<T: Serialize>(
+    stream: &mut TcpStream,
+    value: &T,
+    deadline: Instant,
+) -> Result<(), IoError> {
+    let writer = ResponseWriter { stream, deadline };
+    let mut writer = std::io::BufWriter::new(writer);
+    serde_json::to_writer(&mut writer, value).map_err(IoError::other)?;
+    writer.write_all(b"\n")?;
+    writer.flush()
+}
+
+fn remaining(deadline: Instant) -> Result<Duration, IoError> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        Err(IoError::new(std::io::ErrorKind::TimedOut, "runtime I/O deadline exceeded"))
+    } else {
+        Ok(remaining)
+    }
+}
+
+struct RequestReader {
+    stream: TcpStream,
+    deadline: Instant,
+}
+
+impl Read for RequestReader {
+    fn read(&mut self, buffer: &mut [u8]) -> Result<usize, IoError> {
+        self.stream.set_read_timeout(Some(remaining(self.deadline)?))?;
+        self.stream.read(buffer)
+    }
+}
+
+struct ResponseWriter<'a> {
+    stream: &'a mut TcpStream,
+    deadline: Instant,
+}
+
+impl Write for ResponseWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> Result<usize, IoError> {
+        self.stream.set_write_timeout(Some(remaining(self.deadline)?))?;
+        self.stream.write(bytes)
+    }
+    fn flush(&mut self) -> Result<(), IoError> {
+        self.stream.flush()
+    }
+}
+
+#[cfg(test)]
+mod resource_tests;
