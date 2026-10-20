@@ -243,7 +243,16 @@ impl StreamProcessor {
                     }
                 },
                 OscEvent::PromptMark => {
-                    terminal.reading_shell_marker(b'A', None, self.parser.sync_bytes_count() == 0);
+                    let committed = self.parser.sync_bytes_count() == 0;
+                    // Commit abandoned synchronized output before taking input
+                    // back for the shell. Otherwise buffered mode enables could
+                    // undo prompt recovery when the sync timeout later expires.
+                    if !committed {
+                        self.stop_sync(terminal);
+                    }
+                    // Keep command-range admission tied to the original frame;
+                    // recovery must not promote an uncommitted reading marker.
+                    terminal.reading_shell_marker(b'A', None, committed);
                     terminal.nebula_add_prompt_mark();
                 },
                 OscEvent::PromptInput => {

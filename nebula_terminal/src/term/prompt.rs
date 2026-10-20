@@ -1,8 +1,11 @@
 //! Semantic prompt marks and input boundaries owned by the terminal grid.
 use super::{Term, TermMode};
-use crate::event::EventListener;
+use crate::event::{Event, EventListener};
 use crate::grid::{Dimensions, Scroll};
 use crate::index::{Column, Line, Point};
+
+#[cfg(test)]
+mod tests;
 
 impl<T> Term<T> {
     /// The cursor row in the grid's absolute line numbering (see
@@ -19,9 +22,27 @@ impl<T> Term<T> {
     /// Called by the PTY reader between `parser.advance` slices, so the cursor
     /// sits exactly on the fresh prompt row. Marks only make sense on the
     /// primary screen — the alternate screen has no scrollback to jump.
-    pub fn nebula_add_prompt_mark(&mut self) {
+    pub fn nebula_add_prompt_mark(&mut self)
+    where
+        T: EventListener,
+    {
         if self.mode.contains(TermMode::ALT_SCREEN) {
             return;
+        }
+        // A primary-screen shell prompt takes input back from the foreground
+        // application, including an SSH client that exited without cleanup.
+        // Preserve ConPTY native input and the shell's bracketed-paste mode.
+        let mouse_active = self.mode.intersects(TermMode::MOUSE_MODE);
+        self.mode.remove(
+            TermMode::MOUSE_MODE
+                | TermMode::SGR_MOUSE
+                | TermMode::UTF8_MOUSE
+                | TermMode::KITTY_KEYBOARD_PROTOCOL,
+        );
+        self.keyboard_mode_stack.clear();
+        self.inactive_keyboard_mode_stack.clear();
+        if mouse_active {
+            self.event_proxy.send_event(Event::MouseCursorDirty);
         }
         let abs = self.nebula_cursor_abs_line();
 

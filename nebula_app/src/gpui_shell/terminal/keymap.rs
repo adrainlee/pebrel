@@ -1094,6 +1094,47 @@ mod tests {
     }
 
     #[test]
+    fn shell_prompt_restores_keyboard_encoding_after_interrupted_ssh() {
+        use nebula_terminal::event_loop::StreamProcessor;
+        use nebula_terminal::term::Config;
+
+        for native in [false, true] {
+            let size = super::super::session::GridSize { columns: 80, screen_lines: 24 };
+            let recorder = KeyboardReplyRecorder::default();
+            let mut term = nebula_terminal::Term::new(
+                Config { kitty_keyboard: true, ..Config::default() },
+                &size,
+                recorder.clone(),
+            );
+            let mut stream = StreamProcessor::default();
+            if native {
+                stream.feed(&mut term, &recorder, b"\x1b[?9001h");
+            }
+            let escape = keystroke("escape");
+            let mut interrupt = keystroke("c");
+            interrupt.modifiers.control = true;
+            let original_escape = encode(&escape, term.mode());
+            let original_interrupt = encode(&interrupt, term.mode());
+            if !native {
+                assert_eq!(original_escape, Some(b"\x1b".to_vec()));
+                assert_eq!(original_interrupt, Some(b"\x03".to_vec()));
+            }
+            stream.feed(&mut term, &recorder, b"\x1b[?1003h\x1b[?1006h\x1b[>7u");
+            assert_eq!(encode(&escape, term.mode()), Some(b"\x1b[27u".to_vec()));
+            assert_eq!(encode(&interrupt, term.mode()), Some(b"\x1b[99;5u".to_vec()));
+
+            stream.feed(&mut term, &recorder, b"Connection closed\r\n\x1b]133;A\x07$ ");
+            assert_eq!(encode(&escape, term.mode()), original_escape);
+            assert_eq!(encode(&interrupt, term.mode()), original_interrupt);
+            assert!(!term.mode().intersects(TermMode::MOUSE_MODE));
+
+            // A fresh remote application can negotiate again in the same pane.
+            stream.feed(&mut term, &recorder, b"\x1b[>7u");
+            assert_eq!(encode(&escape, term.mode()), Some(b"\x1b[27u".to_vec()));
+        }
+    }
+
+    #[test]
     fn codex_keyboard_negotiation_preserves_enter_chords_until_reset() {
         use nebula_terminal::term::Config;
         use nebula_terminal::vte::ansi::Processor;
