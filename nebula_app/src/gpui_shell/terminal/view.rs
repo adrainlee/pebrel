@@ -23,6 +23,7 @@ mod notifications;
 mod output_tests;
 mod path_drop;
 mod pointer;
+mod prediction;
 mod reading;
 mod runtime;
 mod startup;
@@ -273,6 +274,7 @@ pub enum SidebarActivity {
 
 pub struct TerminalView {
     assistant: assistant::Assistant,
+    prediction: prediction::Prediction,
     pub(super) answers: crate::assistant_answer::AnswerInbox,
     confirmation: super::confirmation::ConfirmationState,
     pub(super) answer_reader: Option<gpui::Entity<super::answer_reader::AnswerReader>>,
@@ -749,6 +751,7 @@ impl TerminalView {
 
     /// `Exited` 只对宿主发一次；重复的退出信号（ChildExit 之后必然跟 Exit）只更新文案。
     fn mark_exited(&mut self, message: String, cx: &mut Context<Self>) {
+        self.prediction.reset();
         self.assistant.cancel();
         self.clear_output_hover(cx);
         self.reading.cancel_query();
@@ -785,6 +788,7 @@ impl TerminalView {
 
     /// 输入后回到底部并请求重绘。
     fn write_input(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        self.prediction_input();
         self.completion_editor.invalidate();
         self.editor_query_task = None;
         self.cursor_animation.note_input(&bytes);
@@ -945,6 +949,7 @@ impl TerminalView {
         let default_cursor_style = settings.term_config().default_cursor_style;
         let cursor_style_changed = self.default_cursor_style != default_cursor_style;
         self.ghost_enabled = settings.ghost;
+        self.prediction.reset();
         self.completion_style = settings.completion_style;
         // 样式/开关热切换即作废当前提示：缓存键留着会挡住新样式的首次重算。
         self.suggestion_task = None;

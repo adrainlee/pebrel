@@ -128,6 +128,9 @@ pub struct AiProvider {
     pub model: String,
     #[serde(default)]
     pub enabled: bool,
+    /// Explicit opt-in to sending in-progress commands to this provider.
+    #[serde(default)]
+    pub command_completion: bool,
     /// A credential reference only. The actual key is held by the OS store.
     #[serde(default)]
     pub api_key_set: bool,
@@ -154,6 +157,7 @@ impl AiProvider {
             base_url: kind.default_base_url().to_owned(),
             model: kind.default_model().to_owned(),
             enabled: true,
+            command_completion: false,
             api_key_set: false,
             api_key_hint: String::new(),
             full_url: false,
@@ -295,7 +299,15 @@ pub fn save(store: &ProviderStore) -> io::Result<()> {
     }
     let text = serde_json::to_string_pretty(store)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-    std::fs::write(path, text)
+    std::fs::write(path, text)?;
+    CONFIG_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Ok(())
+}
+
+static CONFIG_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn config_generation() -> u64 {
+    CONFIG_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 pub fn credential_target(id: &str) -> String {

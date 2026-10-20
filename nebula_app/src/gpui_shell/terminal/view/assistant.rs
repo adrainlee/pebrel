@@ -365,6 +365,17 @@ impl TerminalView {
         if self.assistant.generation != generation || self.exited.is_some() {
             return;
         }
+        let request =
+            if automatic { &self.assistant.auto_request } else { &self.assistant.last_request };
+        if input_epoch == self.prompt_input_epoch
+            && request.as_ref().is_some_and(|r| {
+                r.cwd == self.cwd && r.environment == self.assistant_context(r.kind, cx).environment
+            })
+            && let Ok(result) = &result
+            && let Some(command) = &result.command
+        {
+            self.remember_prediction_advice(command);
+        }
         self.assistant.task = None;
         self.assistant.automatic_pending = false;
         if automatic {

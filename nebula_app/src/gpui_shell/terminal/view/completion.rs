@@ -6,6 +6,9 @@ use nebula_terminal::term::TermMode;
 
 impl TerminalView {
     pub(super) fn handle_completion_key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        if self.handle_prediction_key(key, cx) {
+            return true;
+        }
         use crate::display::CompletionStyle;
         let hybrid = self.completion_style == CompletionStyle::Hybrid;
         if key == "escape"
@@ -99,6 +102,7 @@ impl TerminalView {
     /// line_buf 在光标移动/Tab 补全后就是拼接垃圾，不能进历史。Agent 已在
     /// 前台时保留最初 shell 提示符，内部交互的 Enter 不得覆盖退出证据。
     pub(super) fn commit_line(&mut self, cx: &mut Context<Self>) {
+        self.prediction.reset();
         self.completion_session.invalidate();
         self.sync_native_prompt();
         let agent_active =
@@ -239,6 +243,7 @@ impl TerminalView {
             || self.session.is_none()
             || matches!(self.ssh_stage, Some(crate::ssh_session::SshStage::Failed(_)))
         {
+            self.prediction_input();
             self.suggestion_task = None;
             self.suggest_anchor = None;
             self.suggest.completion_popup_requested = false;
@@ -249,6 +254,7 @@ impl TerminalView {
         if let Some(line) = line.as_deref()
             && !self.suggest.completion_echo_ready(line)
         {
+            self.prediction_input();
             self.suggestion_task = None;
             self.suggest_anchor = None;
             self.completion_viewport.clear();
@@ -265,6 +271,7 @@ impl TerminalView {
             {
                 return;
             }
+            self.prediction_input();
             self.suggestion_task = None;
             self.suggest_anchor = None;
             self.suggest.screen_line.clear();
@@ -278,6 +285,7 @@ impl TerminalView {
         let mode = self.completion_style;
         let style = mode.active_style(self.suggest.completion_popup_requested);
         let cursor = cursor.unwrap_or(line.len());
+        self.refresh_prediction(&line, cursor, cx);
         let revision = self.completion_editor.revision();
         let key = format!(
             "{}\0cursor={cursor}\0syntax={:?}",
@@ -374,6 +382,7 @@ impl TerminalView {
                 });
                 let awaiting_directory = result.pending_remote_dir.is_some();
                 view.suggest.pending_remote_dir = result.pending_remote_dir;
+                view.apply_prediction();
                 view.completion_viewport
                     .update_query(&view.suggest.screen_line, view.suggest.completion_items.len());
                 view.drive_pending_remote_dir(cx);

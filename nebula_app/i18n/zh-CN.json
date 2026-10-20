@@ -1489,6 +1489,8 @@
     "advanced_active": "高级效果 · 终端效果已启用"
   },
   "assistant": {
+    "completion": "AI 命令补全",
+    "completion_hint": "输入命令单词和空格后，稍作停顿即可获取建议。选中此供应商时，将发送当前输入、目录、相关历史命令及先前建议。需同时开启命令建议。Tab 填入命令，Enter 执行。",
     "query_target": "查询目标：{target}",
     "query_file": "读取日志末尾并发送最多 12 KiB：{path}",
     "query_directory": "列出目录：{path}",

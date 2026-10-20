@@ -103,6 +103,8 @@ impl TerminalView {
         stage: crate::ssh_session::SshStage,
         cx: &mut Context<Self>,
     ) {
+        self.prediction_input();
+        self.prediction.reset();
         self.ssh_stage = Some(stage.clone());
         super::super::ssh_connect_overlay::update_connection_state(
             &mut self.ssh_connect,

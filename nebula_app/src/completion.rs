@@ -340,6 +340,19 @@ pub(crate) fn record_command(scope: &HistoryScope, line: &str, cwd: &str) {
         .record(scope, line, cwd);
 }
 
+/// Bounded, same-environment history for model completion. Called on a worker.
+pub(crate) fn prediction_history(env: &SuggestEnv, prefix: &str) -> Vec<String> {
+    shared()
+        .history
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .search(&env.history_scope(), prefix, 8)
+        .into_iter()
+        .filter(|line| line.len() <= 512)
+        .map(str::to_owned)
+        .collect()
+}
+
 pub(crate) fn record_directory(cwd: &str) {
     if !cwd.is_empty() {
         shared().directories.record(cwd);

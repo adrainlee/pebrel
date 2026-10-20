@@ -1489,6 +1489,8 @@
     "advanced_active": "Advanced effects · Terminal effects enabled"
   },
   "assistant": {
+    "completion": "AI command completion",
+    "completion_hint": "After a command word and a space, pause to get a suggestion. Sends the input, directory, related history and previous advice to this provider when selected. Requires command suggestions to be enabled. Tab fills the command; Enter runs it.",
     "query_target": "Query target: {target}",
     "query_file": "Read the log tail and send up to 12 KiB: {path}",
     "query_directory": "List directory: {path}",

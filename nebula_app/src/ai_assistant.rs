@@ -20,6 +20,7 @@ use zeroize::Zeroizing;
 
 use crate::ai_providers::ProviderKind;
 pub(crate) mod analysis;
+pub(crate) mod prediction;
 pub(crate) mod query;
 #[cfg(feature = "legacy-shell")]
 use crate::event::{Event, EventType};
@@ -325,8 +326,18 @@ fn send_model_request(
     user: &str,
     max_tokens: usize,
 ) -> Result<String, analysis::AnalysisError> {
+    send_model_request_with_timeout(target, system, user, max_tokens, Duration::from_secs(30))
+}
+
+fn send_model_request_with_timeout(
+    target: &RequestTarget,
+    system: &str,
+    user: &str,
+    max_tokens: usize,
+    timeout: Duration,
+) -> Result<String, analysis::AnalysisError> {
     use analysis::AnalysisError;
-    let agent = crate::ai_providers::provider_http_agent(Duration::from_secs(30));
+    let agent = crate::ai_providers::provider_http_agent(timeout);
     let base = target.base_url.trim_end_matches('/');
     let (url, body) = match target.kind {
         ProviderKind::Anthropic => (

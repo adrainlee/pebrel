@@ -368,6 +368,10 @@ impl TerminalView {
         item: crate::display::NebulaCompletionItem,
         cx: &mut Context<Self>,
     ) -> bool {
+        if !self.prediction_item_valid(&item) {
+            self.prediction_input();
+            return true;
+        }
         let insert = item.insert;
         if !self.completion_editor.permits_insert(&insert) {
             return false;

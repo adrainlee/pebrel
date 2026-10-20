@@ -1,6 +1,9 @@
 use super::*;
+use crate::i18n::Message;
 
 mod key;
+#[cfg(all(test, feature = "gpui-test-support"))]
+mod tests;
 
 impl SettingsPane {
     pub(in crate::gpui_shell) fn show_providers(
@@ -120,16 +123,22 @@ impl SettingsPane {
     ) {
         let Some(index) = self.active_provider_index() else { return };
         let provider = &mut self.provider_store.providers[index];
+        let previous = provider.clone();
         match flag {
             "enabled" => provider.enabled = value,
+            "command_completion" => provider.command_completion = value,
             "codex_goals" => provider.codex_goals = value,
             "codex_remote_compaction" => provider.codex_remote_compaction = value,
             _ => return,
         }
         self.provider_codex_confirm = None;
         if let Err(error) = crate::ai_providers::save(&self.provider_store) {
+            self.provider_store.providers[index] = previous;
             self.provider_status = Some(ProviderStatus::Error(error.to_string()));
+        } else {
+            self.provider_status = Some(ProviderStatus::Saved);
         }
+        cx.refresh_windows();
         cx.notify();
     }
 
@@ -246,6 +255,16 @@ impl SettingsPane {
             let goals = provider.codex_goals;
             let remote = provider.codex_remote_compaction;
             editor = editor
+                .child(self.row(
+                    language.text(Message::AssistantCompletion),
+                    language.text(Message::AssistantCompletionHint),
+                    crate::gpui_shell::widgets::NebulaSwitch::new("provider-command-completion")
+                        .checked(provider.command_completion)
+                        .on_click(cx.listener(|this, value: &bool, _, cx| {
+                            this.toggle_provider_flag("command_completion", *value, cx);
+                        })),
+                    cx,
+                ))
                 .child(
                     self.row(
                         language.pick("启用", "Enabled"),
