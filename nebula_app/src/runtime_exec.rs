@@ -313,6 +313,22 @@ pub(crate) fn execute(
     timeout_ms: u64,
     max_output_bytes: usize,
 ) -> Result<Value, ApiError> {
+    execute_cancellable(context, cwd, argv, timeout_ms, max_output_bytes, None)
+}
+
+pub(crate) fn execute_cancellable(
+    context: PaneExecContext,
+    cwd: String,
+    argv: Vec<String>,
+    timeout_ms: u64,
+    max_output_bytes: usize,
+    cancelled: Option<Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<Value, ApiError> {
+    let is_cancelled =
+        || cancelled.as_ref().is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire));
+    if is_cancelled() {
+        return Err(ApiError::new("exec_cancelled", "query cancelled"));
+    }
     let started = Instant::now();
     let (mut command, execution) = build_command(&context, &cwd, &argv)?;
     let mut child = command.spawn().map_err(|error| {
@@ -343,7 +359,7 @@ pub(crate) fn execute(
     let (status, timed_out) = loop {
         match child.try_wait() {
             Ok(Some(status)) => break (status, false),
-            Ok(None) if started.elapsed() < timeout => {
+            Ok(None) if started.elapsed() < timeout && !is_cancelled() => {
                 std::thread::sleep(Duration::from_millis(10));
             },
             Ok(None) => {
@@ -372,6 +388,9 @@ pub(crate) fn execute(
 
     let stdout = join_capture(stdout, "stdout")?.into_text();
     let stderr = join_capture(stderr, "stderr")?.into_text();
+    if is_cancelled() {
+        return Err(ApiError::new("exec_cancelled", "query cancelled"));
+    }
     // Keep the common path as simple as `result.stdout`, while retaining the
     // byte/encoding evidence needed to reason about truncation and lossy UTF-8.
     let capture = json!({
@@ -421,6 +440,42 @@ fn join_capture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancelling_an_owned_query_terminates_its_child() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let flag = cancelled.clone();
+        let signal = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            flag.store(true, Ordering::Release);
+        });
+        #[cfg(windows)]
+        let argv = vec![
+            "powershell.exe".into(),
+            "-NoProfile".into(),
+            "-NonInteractive".into(),
+            "-Command".into(),
+            "Start-Sleep -Seconds 20".into(),
+        ];
+        #[cfg(not(windows))]
+        let argv = vec!["sleep".into(), "20".into()];
+        let started = Instant::now();
+        let result = execute_cancellable(
+            PaneExecContext::host(std::env::current_dir().unwrap()),
+            String::new(),
+            argv,
+            10_000,
+            1024,
+            Some(cancelled),
+        );
+        signal.join().unwrap();
+        assert!(result.is_err_and(|error| error.code == "exec_cancelled"));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "cancellation must not wait for the 10-second query deadline"
+        );
+    }
 
     #[test]
     fn launch_location_distinguishes_host_default_wsl_and_named_wsl() {

@@ -416,11 +416,7 @@ pub fn test_provider(provider: &AiProvider) -> ProviderTestResult {
     } else {
         Zeroizing::new(String::new())
     };
-    let config = ureq::config::Config::builder()
-        .timeout_global(Some(Duration::from_secs(12)))
-        .http_status_as_error(false)
-        .build();
-    let agent: ureq::Agent = config.new_agent();
+    let agent = provider_http_agent(Duration::from_secs(12));
     let mut request = agent.get(&url);
     request = match provider.kind {
         ProviderKind::Anthropic => {
@@ -447,6 +443,17 @@ pub fn test_provider(provider: &AiProvider) -> ProviderTestResult {
         _ => ProviderTestOutcome::HttpStatus { status },
     };
     finish(outcome)
+}
+
+/// Provider requests must stay at the configured endpoint. Redirect handling
+/// strips Authorization, but forwards custom x-api-key/api-key headers.
+pub(crate) fn provider_http_agent(timeout: Duration) -> ureq::Agent {
+    ureq::config::Config::builder()
+        .timeout_global(Some(timeout))
+        .max_redirects(0)
+        .http_status_as_error(false)
+        .build()
+        .new_agent()
 }
 
 #[cfg(feature = "legacy-shell")]

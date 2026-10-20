@@ -104,6 +104,16 @@ impl server::Handler for Loopback {
             if command == b"hang" {
                 return Ok(());
             }
+            if command == b"query-stderr" {
+                session.extended_data(channel, 1, b"permission denied\n".to_vec())?;
+                session.eof(channel)?;
+                return session.exit_status_request(channel, 7);
+            }
+            if command == b"query-overflow" {
+                session.data(channel, vec![b'x'; 70 * 1024])?;
+                session.exit_status_request(channel, 0)?;
+                return session.eof(channel);
+            }
             let command = std::str::from_utf8(command).unwrap();
             let output = if command.contains("'config'") {
                 "remote.origin.fetch\n+refs/heads/*:refs/remotes/origin/*\0completion.snapshot\ntrue\0"
@@ -400,6 +410,69 @@ fn exec_probe_timeout_and_cancellation_close_the_channel() {
             .is_err()
         );
         assert_eq!(fixture.data.recv().await.unwrap(), b"closed");
+        fixture.forget(&acquired.session).await;
+    });
+}
+
+#[test]
+fn approved_query_reuses_exact_transport_and_revokes_on_cancel_or_pane_close() {
+    check(async {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let mut fixture = Fixture::new(Mode::CompletionMetadata).await;
+        let acquired = fixture.connect().await;
+        let (scope, reader) = super::super::transcript::TranscriptScope::new(&acquired.session);
+        let (_other_scope, other_reader) =
+            super::super::transcript::TranscriptScope::new(&acquired.session);
+        assert!(reader.same_scope(&reader.clone()));
+        assert!(
+            !reader.same_scope(&other_reader),
+            "sharing a transport does not share pane authorization"
+        );
+        for _ in 0..2 {
+            let output =
+                reader.capture_command("'probe'", Arc::new(AtomicBool::new(false))).await.unwrap();
+            assert!(output.contains("feature/guest"));
+            assert!(output.contains("exit_code=Some(0)"));
+            assert_eq!(fixture.data.recv().await.unwrap(), b"closed");
+            assert!(!acquired.session.is_closed());
+        }
+        let output =
+            reader.capture_command("query-stderr", Arc::new(AtomicBool::new(false))).await.unwrap();
+        assert!(output.contains("permission denied"));
+        assert!(output.contains("exit_code=Some(7)"));
+        assert_eq!(fixture.data.recv().await.unwrap(), b"closed");
+        let output = reader
+            .capture_command("query-overflow", Arc::new(AtomicBool::new(false)))
+            .await
+            .unwrap();
+        assert!(output.contains("truncated=true"));
+        assert!(output.len() < 65 * 1024);
+        assert_eq!(fixture.data.recv().await.unwrap(), b"closed");
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let flag = cancelled.clone();
+        let read = reader.capture_command("hang", cancelled);
+        let cancel = async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            flag.store(true, Ordering::Release);
+        };
+        let (result, _) = tokio::join!(read, cancel);
+        assert!(result.is_err());
+        assert_eq!(fixture.data.recv().await.unwrap(), b"closed");
+        assert!(
+            !acquired.session.is_closed(),
+            "cancelling a probe preserves the terminal connection"
+        );
+        let close = async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            drop(scope);
+        };
+        let (result, _) =
+            tokio::join!(reader.capture_command("hang", Arc::new(AtomicBool::new(false))), close);
+        assert!(result.is_err());
+        assert_eq!(fixture.data.recv().await.unwrap(), b"closed");
+        assert!(!reader.is_live());
+        assert!(reader.capture_command("'probe'", Arc::new(AtomicBool::new(false))).await.is_err());
+        assert!(other_reader.is_live());
         fixture.forget(&acquired.session).await;
     });
 }

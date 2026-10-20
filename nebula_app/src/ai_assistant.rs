@@ -19,6 +19,8 @@ use winit::event_loop::EventLoopProxy;
 use zeroize::Zeroizing;
 
 use crate::ai_providers::ProviderKind;
+pub(crate) mod analysis;
+pub(crate) mod query;
 #[cfg(feature = "legacy-shell")]
 use crate::event::{Event, EventType};
 
@@ -128,35 +130,7 @@ struct RequestTarget {
 fn request_target(cfg: &AssistantConfig) -> Option<RequestTarget> {
     let store = crate::ai_providers::load();
     if let Some(provider) = crate::ai_providers::active_enabled(&store) {
-        let key = if provider.kind.requires_api_key() {
-            let secret = match crate::ai_providers::load_api_key(&provider.id) {
-                Ok(Some(secret)) => secret,
-                Ok(None) => {
-                    info!("assistant: active provider has no credential");
-                    return None;
-                },
-                Err(err) => {
-                    warn!("assistant: credential lookup failed: {err}");
-                    return None;
-                },
-            };
-            match String::from_utf8(secret) {
-                Ok(key) => Zeroizing::new(key),
-                Err(_) => {
-                    warn!("assistant: provider credential is not valid UTF-8");
-                    return None;
-                },
-            }
-        } else {
-            Zeroizing::new(String::new())
-        };
-        return Some(RequestTarget {
-            kind: provider.kind,
-            base_url: provider.base_url.clone(),
-            model: provider.model.clone(),
-            full_url: provider.full_url,
-            key,
-        });
+        return provider_target(provider);
     }
 
     Some(RequestTarget {
@@ -165,6 +139,38 @@ fn request_target(cfg: &AssistantConfig) -> Option<RequestTarget> {
         model: cfg.model.clone(),
         full_url: false,
         key: fallback_api_key()?,
+    })
+}
+
+fn provider_target(provider: &crate::ai_providers::AiProvider) -> Option<RequestTarget> {
+    let key = if provider.kind.requires_api_key() {
+        let secret = match crate::ai_providers::load_api_key(&provider.id) {
+            Ok(Some(secret)) => secret,
+            Ok(None) => {
+                info!("assistant: active provider has no credential");
+                return None;
+            },
+            Err(err) => {
+                warn!("assistant: credential lookup failed: {err}");
+                return None;
+            },
+        };
+        match String::from_utf8(secret) {
+            Ok(key) => Zeroizing::new(key),
+            Err(_) => {
+                warn!("assistant: provider credential is not valid UTF-8");
+                return None;
+            },
+        }
+    } else {
+        Zeroizing::new(String::new())
+    };
+    Some(RequestTarget {
+        kind: provider.kind,
+        base_url: provider.base_url.clone(),
+        model: provider.model.clone(),
+        full_url: provider.full_url,
+        key,
     })
 }
 
@@ -250,35 +256,11 @@ pub fn is_dangerous(command: &str) -> bool {
     PATTERNS.iter().any(|p| lower.contains(p))
 }
 
-/// 打码疑似密钥：40+ 连续 base64/hex 字符（token、私钥体、connection
-/// string 的主体形态）替换为 `[redacted]` 后再出境。
-pub fn redact_secrets(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut run = String::new();
-    let flush = |run: &mut String, out: &mut String| {
-        if run.chars().count() >= 40 {
-            out.push_str("[redacted]");
-        } else {
-            out.push_str(run);
-        }
-        run.clear();
-    };
-    for ch in text.chars() {
-        if ch.is_ascii_alphanumeric()
-            || ch == '+'
-            || ch == '/'
-            || ch == '='
-            || ch == '-'
-            || ch == '_'
-        {
-            run.push(ch);
-        } else {
-            flush(&mut run, &mut out);
-            out.push(ch);
-        }
-    }
-    flush(&mut run, &mut out);
-    out
+mod redaction;
+pub use redaction::redact_secrets;
+
+pub(crate) fn valid_suggested_command(command: &str) -> bool {
+    command.len() <= 4096 && !command.chars().any(char::is_control)
 }
 
 /// Everything one fix request carries to the model.
@@ -327,29 +309,33 @@ fn request_fix(cfg: &AssistantConfig, req: &FixRequest) -> Option<AiFix> {
     let user = format!(
         "OS: {}\nCommand: {}\nExit code: {}\nDirectory: {}\nGit branch: {}\nOutput (tail):\n{}",
         std::env::consts::OS,
-        req.command,
+        redact_secrets(&req.command),
         req.exit_code,
-        req.cwd,
-        if req.branch.is_empty() { "-" } else { &req.branch },
-        req.output_tail,
+        redact_secrets(&req.cwd),
+        redact_secrets(if req.branch.is_empty() { "-" } else { &req.branch }),
+        redact_secrets(&req.output_tail),
     );
-    let content = send_model_request(&target, &user)?;
+    let content = send_model_request(&target, SYSTEM_PROMPT, &user, 300).ok()?;
     parse_fix(&content)
 }
 
-fn send_model_request(target: &RequestTarget, user: &str) -> Option<String> {
-    let config =
-        ureq::config::Config::builder().timeout_global(Some(Duration::from_secs(30))).build();
-    let agent: ureq::Agent = config.new_agent();
+fn send_model_request(
+    target: &RequestTarget,
+    system: &str,
+    user: &str,
+    max_tokens: usize,
+) -> Result<String, analysis::AnalysisError> {
+    use analysis::AnalysisError;
+    let agent = crate::ai_providers::provider_http_agent(Duration::from_secs(30));
     let base = target.base_url.trim_end_matches('/');
     let (url, body) = match target.kind {
         ProviderKind::Anthropic => (
             if target.full_url { base.to_owned() } else { format!("{base}/messages") },
             serde_json::json!({
                 "model": target.model,
-                "system": SYSTEM_PROMPT,
+                "system": system,
                 "temperature": 0.2,
-                "max_tokens": 300,
+                "max_tokens": max_tokens,
                 "messages": [{"role": "user", "content": user}],
             }),
         ),
@@ -362,9 +348,9 @@ fn send_model_request(target: &RequestTarget, user: &str) -> Option<String> {
                     format!("{base}/models/{model}:generateContent")
                 },
                 serde_json::json!({
-                    "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+                    "systemInstruction": {"parts": [{"text": system}]},
                     "contents": [{"role": "user", "parts": [{"text": user}]}],
-                    "generationConfig": {"temperature": 0.2, "maxOutputTokens": 300},
+                    "generationConfig": {"temperature": 0.2, "maxOutputTokens": max_tokens},
                 }),
             )
         },
@@ -374,11 +360,11 @@ fn send_model_request(target: &RequestTarget, user: &str) -> Option<String> {
             } else {
                 format!("{base}/{}/chat/completions?api-version=2024-10-21", target.model)
             },
-            openai_body(&target.model, user),
+            openai_body(&target.model, system, user, max_tokens),
         ),
         _ => (
             if target.full_url { base.to_owned() } else { format!("{base}/chat/completions") },
-            openai_body(&target.model, user),
+            openai_body(&target.model, system, user, max_tokens),
         ),
     };
     let mut request = agent.post(&url);
@@ -396,32 +382,49 @@ fn send_model_request(target: &RequestTarget, user: &str) -> Option<String> {
         Ok(response) => response,
         Err(err) => {
             warn!("assistant: request failed: {err}");
-            return None;
+            return Err(AnalysisError::RequestFailed);
         },
     };
-    let value: serde_json::Value = match response.body_mut().read_json() {
-        Ok(value) => value,
-        Err(err) => {
-            warn!("assistant: bad response body: {err}");
-            return None;
-        },
-    };
-    match target.kind {
-        ProviderKind::Anthropic => value["content"][0]["text"].as_str().map(str::to_owned),
+    if !response.status().is_success() {
+        return Err(AnalysisError::RequestFailed);
+    }
+    let value: serde_json::Value =
+        match response.body_mut().with_config().limit(256 * 1024).read_json() {
+            Ok(value) => value,
+            Err(err) => {
+                warn!("assistant: bad response body: {err}");
+                return Err(AnalysisError::InvalidResponse);
+            },
+        };
+    let content = match target.kind {
+        ProviderKind::Anthropic => value["content"].as_array().map(|parts| {
+            parts
+                .iter()
+                .filter(|part| part["type"].as_str().is_none_or(|kind| kind == "text"))
+                .filter_map(|part| part["text"].as_str())
+                .collect::<String>()
+        }),
         ProviderKind::Google => {
-            value["candidates"][0]["content"]["parts"][0]["text"].as_str().map(str::to_owned)
+            value["candidates"][0]["content"]["parts"].as_array().map(|parts| {
+                parts
+                    .iter()
+                    .filter(|part| part["thought"].as_bool() != Some(true))
+                    .filter_map(|part| part["text"].as_str())
+                    .collect::<String>()
+            })
         },
         _ => value["choices"][0]["message"]["content"].as_str().map(str::to_owned),
-    }
+    };
+    content.filter(|text| !text.trim().is_empty()).ok_or(AnalysisError::InvalidResponse)
 }
 
-fn openai_body(model: &str, user: &str) -> serde_json::Value {
+fn openai_body(model: &str, system: &str, user: &str, max_tokens: usize) -> serde_json::Value {
     serde_json::json!({
         "model": model,
         "temperature": 0.2,
-        "max_tokens": 300,
+        "max_tokens": max_tokens,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
     })
@@ -432,9 +435,13 @@ fn openai_body(model: &str, user: &str) -> serde_json::Value {
 fn parse_fix(content: &str) -> Option<AiFix> {
     let start = content.find('{')?;
     let end = content.rfind('}')?;
-    let value: serde_json::Value = serde_json::from_str(&content[start..=end]).ok()?;
-    let command = value["command"].as_str()?.trim().to_owned();
-    if command.is_empty() || command.contains('\n') {
+    let value: serde_json::Value = serde_json::from_str(content.get(start..=end)?).ok()?;
+    let raw_command = value["command"].as_str()?;
+    if !valid_suggested_command(raw_command) {
+        return None;
+    }
+    let command = raw_command.trim().to_owned();
+    if command.is_empty() {
         return None;
     }
     let explain = value["explain"].as_str().unwrap_or_default().trim().to_owned();
@@ -501,5 +508,14 @@ mod tests {
         assert_eq!(cfg.model, "m1");
         assert_eq!(cfg.ignored_exit_codes, vec![2, 3]);
         assert!(!AssistantConfig::parse("").enabled);
+    }
+
+    #[test]
+    fn legacy_reply_rejects_reversed_braces_and_terminal_controls() {
+        assert!(parse_fix("}} {{{").is_none());
+        for command in ["echo one\recho two", "echo hi\n", "echo\x1b[31m bad"] {
+            let reply = serde_json::json!({"command":command,"explain":"fixture"}).to_string();
+            assert!(parse_fix(&reply).is_none());
+        }
     }
 }
