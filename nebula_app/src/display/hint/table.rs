@@ -79,6 +79,14 @@ fn continuation<T>(term: &Term<T>, line: Line, left: usize) -> bool {
 }
 
 pub(super) fn at<T>(term: &Term<T>, point: Point) -> Option<TableLink> {
+    // SizeInfo can lead the grid during resize. Check the actual storage before
+    // scanning columns; retained scrollback rows remain valid hit-test inputs.
+    if point.column.0 >= term.columns()
+        || point.line < term.topmost_line()
+        || point.line > term.bottommost_line()
+    {
+        return None;
+    }
     let left = (0..point.column.0)
         .rfind(|&col| border(term.grid()[Point::new(point.line, Column(col))].c))?;
     let right = (point.column.0 + 1..term.columns())

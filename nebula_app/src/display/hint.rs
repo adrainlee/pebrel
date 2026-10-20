@@ -877,6 +877,22 @@ mod tests {
     }
 
     #[test]
+    fn table_links_reject_stale_resize_coordinates() {
+        let term = mock_term("│ https://example.com/123456 │\r\n│ 7                          │");
+        for point in [
+            Point::new(Line(0), Column(term.columns())),
+            Point::new(Line(0), Column(term.columns() + 4)),
+            Point::new(Line(0), Column(usize::MAX)),
+            Point::new(term.bottommost_line() + 1, Column(4)),
+            Point::new(term.topmost_line() - 1, Column(4)),
+            Point::new(Line(i32::MIN), Column(4)),
+            Point::new(Line(i32::MAX), Column(4)),
+        ] {
+            assert!(table::at(&term, point).is_none(), "{point:?}");
+        }
+    }
+
+    #[test]
     fn bordered_table_links_resolve_the_same_full_target_from_either_fragment() {
         let first = "https://github.com/Kuddev/pebrel/blob/main/nebula_ap";
         let suffix = "p/src/config/ui_config.rs";
