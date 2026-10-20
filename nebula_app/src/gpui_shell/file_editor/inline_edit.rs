@@ -116,8 +116,14 @@ impl Projection {
             return true;
         }
         let (visible_before, visible_after) = changed_span(&self.text, text);
+        // A visible boundary can belong to two leaves. The fallback is valid
+        // only for the leaf that also owns the actual source edit; otherwise a
+        // byte delta can move a neighbour's start into a Unicode code point.
         let Some(index) = self.leaves.iter().position(|leaf| {
-            leaf.visible.start <= visible_before.start && leaf.visible.end >= visible_before.end
+            leaf.visible.start <= visible_before.start
+                && leaf.visible.end >= visible_before.end
+                && leaf.source.start <= source_before.start
+                && leaf.source.end >= source_before.end
         }) else {
             return false;
         };
@@ -519,7 +525,9 @@ impl Projection {
             .iter()
             .enumerate()
             .filter(|(_, leaf)| {
-                leaf.visible.start <= removed.start && leaf.visible.end >= removed.start
+                leaf.visible.start <= removed.start
+                    && (leaf.visible.end > removed.start
+                        || (removed.is_empty() && leaf.visible.end == removed.start))
             })
             .max_by_key(|(_, leaf)| leaf.marks != Marks::default())
             .map(|(index, _)| index)
@@ -793,8 +801,9 @@ fn inline_code(text: &str) -> String {
     }
     let length = text.split(|ch| ch != '`').map(str::len).max().unwrap_or(0) + 1;
     let fence = "`".repeat(length);
-    let padding = if text.as_bytes().first().is_some_and(|byte| matches!(byte, b'`' | b' '))
-        || text.as_bytes().last().is_some_and(|byte| matches!(byte, b'`' | b' '))
+    let padding = if !text.bytes().all(|byte| byte == b' ')
+        && (text.as_bytes().first().is_some_and(|byte| matches!(byte, b'`' | b' '))
+            || text.as_bytes().last().is_some_and(|byte| matches!(byte, b'`' | b' ')))
     {
         " "
     } else {
@@ -806,6 +815,46 @@ fn inline_code(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unicode_replacements_at_mark_boundaries_keep_subsequent_edits_valid() {
+        for source in ["a **粗体** tail", "a `粗体` tail", "a [粗体](url) tail"] {
+            let mut projection = Projection::new(source);
+            let next = "a 粗体😀tail";
+            let rewritten = projection.replace(next);
+            assert_eq!(Projection::new(&rewritten).text, next);
+            assert!(projection.accept(next, &rewritten));
+            for offset in next.char_indices().map(|(offset, _)| offset) {
+                let mut edited = next.to_owned();
+                edited.insert_str(offset, "中");
+                let rewritten = projection.replace(&edited);
+                assert_eq!(Projection::new(&rewritten).text, edited);
+                assert!(projection.source.is_char_boundary(projection.source_offset(offset)));
+            }
+        }
+    }
+
+    #[test]
+    fn fallback_rejects_edits_spanning_source_leaves_without_mutating_offsets() {
+        let source = "a **粗体** tail";
+        let mut projection = Projection::new(source);
+        let before = projection.text.clone();
+        assert!(!projection.accept("a 粗体😀tail", "a **粗体😀**tail"));
+        assert_eq!(projection.source, source);
+        assert_eq!(projection.text, before);
+        for offset in before.char_indices().map(|(offset, _)| offset) {
+            assert!(source.is_char_boundary(projection.source_offset(offset)));
+        }
+    }
+
+    #[test]
+    fn inline_code_edits_round_trip_spaces_and_backticks() {
+        for text in [" ", "  ", " code", "code ", " code ", "`", "`code`", "中😀"] {
+            let projection = Projection::new("before `code` after");
+            let next = format!("before {text} after");
+            assert_eq!(Projection::new(&projection.replace(&next)).text, next);
+        }
+    }
 
     #[test]
     fn formatted_text_edits_preserve_delimiters_and_destinations() {

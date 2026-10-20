@@ -228,6 +228,13 @@ impl TextFileView {
             return;
         }
         let Some(original) = self.source_slice(range.clone(), cx) else { return };
+        let context = self
+            .outline
+            .source_ranges
+            .iter()
+            .position(|block| block.start <= range.start && range.end <= block.end)
+            .map(|block| self.outline.part_source(block, &original))
+            .unwrap_or_else(|| original.clone());
         let input = cx.new(|cx| {
             let mut input = InputState::new(window, cx);
             input.set_value(url.clone(), window, cx);
@@ -241,6 +248,7 @@ impl TextFileView {
             let input = input.clone();
             let range = range.clone();
             let original = original.clone();
+            let context = context.clone();
             let url = url.clone();
             let owner = owner.clone();
             let language = super::super::config::ui_language(cx);
@@ -268,7 +276,8 @@ impl TextFileView {
                             return false;
                         }
                         if next != url.as_ref() {
-                            let Some(replacement) = replace_destination(&original, &next) else {
+                            let Some(replacement) = replace_destination(&original, &next, &context)
+                            else {
                                 return false;
                             };
                             view.commit_source_edit(range.clone(), &replacement, None, window, cx);
@@ -284,26 +293,51 @@ impl TextFileView {
     }
 }
 
-pub(super) fn replace_destination(source: &str, destination: &str) -> Option<String> {
-    if source.starts_with('<') && source.ends_with('>') {
-        return Some(format!("<{}>", destination.replace('>', "%3E").replace('<', "%3C")));
-    }
-    if !source.starts_with('[') {
-        return Some(destination.to_owned());
+pub(super) fn replace_destination(
+    source: &str,
+    destination: &str,
+    context: &str,
+) -> Option<String> {
+    if destination.trim().is_empty() || destination.chars().any(char::is_control) {
+        return None;
     }
     // 标签可含嵌套括号、转义和代码；不能从 title 里的 ]( 反推标签边界。
-    let close = label_end(source)?;
-    let label = source.get(1..close)?;
+    let label = if source.starts_with('[') {
+        source.get(1..label_end(source)?)?.to_owned()
+    } else {
+        // Autolinks cannot express relative paths or URLs containing spaces.
+        // Convert the occurrence to an inline link, retaining its visible label.
+        let label =
+            source.strip_prefix('<').and_then(|text| text.strip_suffix('>')).unwrap_or(source);
+        let mut escaped = String::new();
+        for ch in label.chars() {
+            if ch.is_ascii_punctuation() {
+                escaped.push('\\');
+            }
+            escaped.push(ch);
+        }
+        escaped
+    };
     let destination = destination
         .replace('\\', "\\\\")
         .replace('&', "&amp;")
         .replace('>', "%3E")
         .replace('<', "%3C");
-    let title = markdown::to_mdast(source, &markdown::ParseOptions::gfm()).ok().and_then(|node| {
-        node.children().and_then(|nodes| nodes.first()).and_then(|node| node.children()).and_then(
+    let title = markdown::to_mdast(context, &markdown::ParseOptions::gfm()).ok().and_then(|root| {
+        root.children().and_then(|nodes| nodes.first()).and_then(|node| node.children()).and_then(
             |nodes| {
                 nodes.iter().find_map(|node| match node {
                     markdown::mdast::Node::Link(link) => link.title.clone(),
+                    markdown::mdast::Node::LinkReference(link) => {
+                        root.children()?.iter().find_map(|definition| match definition {
+                            markdown::mdast::Node::Definition(definition)
+                                if definition.identifier == link.identifier =>
+                            {
+                                definition.title.clone()
+                            },
+                            _ => None,
+                        })
+                    },
                     _ => None,
                 })
             },
@@ -361,4 +395,49 @@ fn label_end(source: &str) -> Option<usize> {
         index += 1;
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parsed_link(source: &str) -> markdown::mdast::Link {
+        let root = markdown::to_mdast(source, &markdown::ParseOptions::gfm()).unwrap();
+        let children = root.children().unwrap()[0].children().unwrap();
+        assert_eq!(children.len(), 1, "{source}");
+        let markdown::mdast::Node::Link(link) = &children[0] else { panic!("{source}") };
+        link.clone()
+    }
+
+    #[test]
+    fn autolink_destination_edits_preserve_full_targets_and_labels() {
+        for source in
+            ["<https://old.example/a?x=1&copy;=2>", "https://old.example/a", "<me@example.org>"]
+        {
+            for destination in [
+                "./next.md",
+                "https://new.example/a b",
+                "https://new.example/?x=1&copy;=2",
+                "mailto:new@example.org",
+            ] {
+                let replacement = replace_destination(source, destination, source).unwrap();
+                let link = parsed_link(&replacement);
+                assert_eq!(link.url, destination);
+                let markdown::mdast::Node::Text(label) = &link.children[0] else { panic!() };
+                assert_eq!(label.value, source.trim_start_matches('<').trim_end_matches('>'));
+            }
+        }
+    }
+
+    #[test]
+    fn reference_destination_edits_preserve_resolved_titles() {
+        for source in ["[label][ref]", "[ref][]", "[ref]"] {
+            let context = format!("{source}\n\n[ref]: https://old.example \"Useful &amp; title\"");
+            let replacement = replace_destination(source, "./next.md", &context).unwrap();
+            let link = parsed_link(&replacement);
+            assert_eq!(link.url, "./next.md");
+            assert_eq!(link.title.as_deref(), Some("Useful & title"));
+        }
+        assert!(replace_destination("[x](url)", "\n", "[x](url)").is_none());
+    }
 }

@@ -6,7 +6,7 @@ use gpui_component::Root;
 fn link_destination_edit_preserves_nested_labels_titles_and_other_occurrences() {
     use super::link_actions::replace_destination;
     let source = r#"[a [nested] `](` \\*label*](https://old.test "title ]( &amp; tail")"#;
-    let replacement = replace_destination(source, "https://new.test/?a=1&copy;=2").unwrap();
+    let replacement = replace_destination(source, "https://new.test/?a=1&copy;=2", source).unwrap();
     assert!(replacement.starts_with(r#"[a [nested] `](` \\*label*](<"#));
     let ast = markdown::to_mdast(&replacement, &markdown::ParseOptions::gfm()).unwrap();
     let link = ast.children().unwrap()[0]
@@ -22,7 +22,7 @@ fn link_destination_edit_preserves_nested_labels_titles_and_other_occurrences() 
     assert_eq!(link.url, "https://new.test/?a=1&copy;=2");
     assert_eq!(link.title.as_deref(), Some("title ]( & tail"));
     assert_eq!(
-        replace_destination("[same][ref]", "https://new.test").unwrap(),
+        replace_destination("[same][ref]", "https://new.test", "[same][ref]").unwrap(),
         "[same](<https://new.test>)"
     );
 }
@@ -144,7 +144,7 @@ fn link_edit_cancel_apply_and_reader_undo_change_only_the_selected_occurrence(
     }
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("link-edit.md");
-    let source = "[same][ref] and [same][ref]\n\n[ref]: https://old.example";
+    let source = "[same][ref] and [same][ref]\n\n[ref]: https://old.example \"Useful title\"";
     std::fs::write(&path, source).unwrap();
     let (file, mut cx) = open(path.clone(), cx);
     cx.update(|window, cx| {
@@ -183,7 +183,11 @@ fn link_edit_cancel_apply_and_reader_undo_change_only_the_selected_occurrence(
         let expected = if cancel {
             source.to_owned()
         } else {
-            source.replacen("and [same][ref]", "and [same](<https://new.example/full7>)", 1)
+            source.replacen(
+                "and [same][ref]",
+                "and [same](<https://new.example/full7> \"Useful title\")",
+                1,
+            )
         };
         assert_eq!(file.read_with(&cx, |view, cx| view.draft(cx)), expected);
         assert_eq!(

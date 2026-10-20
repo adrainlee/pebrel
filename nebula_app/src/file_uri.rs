@@ -136,27 +136,14 @@ pub fn classify_link_target_with_cwd(raw: &str, cwd: Option<&Path>) -> LinkTarge
 
     // 1. Try to resolve as a local absolute, UNC, home-relative path, or explicit file: URI
     if let Some(path) = file_uri_to_local_path(target) {
-        // UNC paths (\\server\share\...): skip synchronous exists() check to prevent blocking UI thread.
-        let is_unc = path.to_str().map_or(false, |s| s.starts_with(r"\\"));
-        if is_unc || path.exists() {
-            return LinkTargetKind::LocalExisting(path);
-        } else if let Some(base) = path_without_line_count(&path).filter(|base| base.exists()) {
-            return LinkTargetKind::LocalExisting(base);
-        } else {
-            return LinkTargetKind::LocalMissing(path);
-        }
+        return classify_local_path(path);
     }
 
     // 2. Check if it's an explicit relative path (e.g. ./x, ../x)
     if is_explicit_relative_path(target) {
         if let Some(base) = cwd {
             let clean = clean_relative_prefix(target);
-            let resolved = base.join(clean);
-            if resolved.exists() {
-                return LinkTargetKind::LocalExisting(resolved);
-            } else {
-                return LinkTargetKind::LocalMissing(resolved);
-            }
+            return classify_relative_path(base, clean);
         }
         return LinkTargetKind::RelativePath(target.to_string());
     }
@@ -173,18 +160,42 @@ pub fn classify_link_target_with_cwd(raw: &str, cwd: Option<&Path>) -> LinkTarge
         && !has_scheme_prefix(target)
     {
         if let Some(base) = cwd {
-            let resolved = base.join(target);
-            if resolved.exists() {
-                return LinkTargetKind::LocalExisting(resolved);
-            } else {
-                return LinkTargetKind::LocalMissing(resolved);
-            }
+            return classify_relative_path(base, target);
         } else {
             return LinkTargetKind::RelativePath(target.to_string());
         }
     }
 
     LinkTargetKind::Unrecognized(target.to_string())
+}
+
+fn classify_local_path(path: PathBuf) -> LinkTargetKind {
+    // Keep UNC launch behavior without probing potentially unavailable shares.
+    if path.to_str().is_some_and(|path| path.starts_with(r"\\")) || path.exists() {
+        LinkTargetKind::LocalExisting(path)
+    } else if let Some(base) = path_without_line_count(&path).filter(|base| base.exists()) {
+        LinkTargetKind::LocalExisting(base)
+    } else {
+        LinkTargetKind::LocalMissing(path)
+    }
+}
+
+fn classify_relative_path(base: &Path, target: &str) -> LinkTargetKind {
+    let literal = classify_local_path(base.join(target));
+    if matches!(literal, LinkTargetKind::LocalExisting(_)) {
+        return literal;
+    }
+    // Terminal output can contain literal percent signs. Prefer that spelling,
+    // then try the decoded Markdown/URI spelling without changing path kind.
+    let decoded = percent_decode_utf8(target);
+    if decoded != target
+        && !decoded.starts_with(['/', '\\'])
+        && !is_drive_prefixed(&decoded)
+        && !has_scheme_prefix(&decoded)
+    {
+        return classify_local_path(base.join(decoded));
+    }
+    literal
 }
 
 // A bare hint can stop at the space in `(121 行)`, leaving only `(121`.
@@ -872,6 +883,50 @@ mod tests {
         assert_eq!(t_win("./README.md"), None);
         assert_eq!(t_unix("./README.md"), None);
         assert_eq!(t_unix("docs/spec.md"), None);
+    }
+
+    #[test]
+    fn relative_links_decode_urls_and_line_counts_but_prefer_literal_names() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path();
+        for name in [
+            "a b.md",
+            "中文.md",
+            "notes.md",
+            "literal%20name.md",
+            "literal name.md",
+            "notes.md (121",
+        ] {
+            std::fs::write(base.join(name), "fixture").unwrap();
+        }
+        for (target, expected) in [
+            ("./a%20b.md", "a b.md"),
+            ("a%20b.md", "a b.md"),
+            ("./%E4%B8%AD%E6%96%87.md", "中文.md"),
+            ("./notes.md (122", "notes.md"),
+            ("notes.md (122 行)", "notes.md"),
+            ("./a%20b.md%20(122", "a b.md"),
+            ("./literal%20name.md", "literal%20name.md"),
+            ("./notes.md (121", "notes.md (121"),
+        ] {
+            assert_eq!(
+                classify_link_target_with_cwd(target, Some(base)),
+                LinkTargetKind::LocalExisting(base.join(expected)),
+                "{target}"
+            );
+        }
+        assert_eq!(
+            classify_link_target_with_cwd("./missing%20file.md", Some(base)),
+            LinkTargetKind::LocalMissing(base.join("missing file.md"))
+        );
+        assert_eq!(
+            classify_link_target_with_cwd("./a%20b.md", None),
+            LinkTargetKind::RelativePath("./a%20b.md".into())
+        );
+        assert_eq!(
+            classify_link_target_with_cwd("./%2Fetc/passwd", Some(base)),
+            LinkTargetKind::LocalMissing(base.join("%2Fetc/passwd"))
+        );
     }
 
     #[test]
