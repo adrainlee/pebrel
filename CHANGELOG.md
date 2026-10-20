@@ -4,6 +4,34 @@ Every release entry is provided in English and Simplified Chinese.
 
 每个版本条目均同时提供英文和简体中文说明。
 
+## 2.2.3 - 2026-10-20 (local Windows test build / 本地 Windows 测试包)
+
+### English
+
+#### Added
+
+- Added: Type `/ai` and press Enter to describe an operation, review the generated command and confirm execution. The assistant can select a configured AI provider and model for each terminal pane.
+- Added: Optional AI command completion uses command history and waits for a complete word before requesting suggestions. Tab fills the suggestion; Enter executes it.
+
+#### Fixed
+
+- Fixed: The assistant can insert and confirm commands at recognized idle remote shell prompts after running `ssh` from PowerShell, without requiring remote shell integration. Changes to the connection, prompt or selected model invalidate previously generated commands.
+
+### 中文
+
+#### 新增
+
+- 新增：输入 `/ai` 并按回车即可描述操作、审阅生成的命令并确认执行。助手支持为每个终端窗格选择已配置的 AI 服务和模型。
+- 新增：可选的 AI 命令补全参考历史命令，在输入完整单词后请求建议；Tab 填入，Enter 执行。
+
+#### 修复
+
+- 修复：在 PowerShell 中运行 `ssh` 后，助手可在已识别的远程空闲 shell 提示符插入并确认命令，无需远端 shell 集成。连接、提示符或所选模型变化时，先前生成的命令会失效。
+
+This is a local test build; no GitHub release has been published. Real-server SSH acceptance remains pending.
+
+本版为本地测试包，尚未发布 GitHub Release；真实服务器 SSH 场景仍待验收。
+
 ## 2.2.2 - 2026-10-16
 
 - `Pebrel-v2.2.2-linux-x64-preview.AppImage`: `PENDING FINAL BUILD`

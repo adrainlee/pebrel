@@ -1,6 +1,6 @@
 [package]
 name = "nebula"
-version = "2.2.2"
+version = "2.2.3"
 license = "GPL-3.0-or-later"
 description = "Pebrel — a GPU-accelerated terminal emulator"
 readme = "README.md"

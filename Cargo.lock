@@ -5287,7 +5287,7 @@ dependencies = [
 
 [[package]]
 name = "nebula"
-version = "2.2.2"
+version = "2.2.3"
 dependencies = [
  "ab_glyph_rasterizer",
  "aes-gcm",
