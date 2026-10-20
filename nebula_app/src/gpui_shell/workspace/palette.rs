@@ -1,5 +1,34 @@
 use super::*;
 
+#[derive(Clone)]
+pub(super) enum WorkspacePaletteAction {
+    TerminalAssistant,
+    TerminalReading {
+        commands: bool,
+    },
+    Shared(crate::display::command_palette::PaletteAction),
+    /// 聚焦已经存在的工作区标签，不创建副本。
+    FocusTab(usize),
+    LayoutRecipes,
+    /// 先激活标签，再把焦点交给其中的明确 pane。
+    FocusPane {
+        tab: usize,
+        pane: u64,
+    },
+    /// 在 frecency 目录中新建终端；已有目录中的 pane 由上面的 FocusPane 命中。
+    OpenDirectory(std::path::PathBuf),
+    RunAiSession {
+        command: String,
+        cwd: Option<std::path::PathBuf>,
+    },
+    /// 启动器混排的 SSH 主机行（数据源 = 共享主机列表权威）。
+    LaunchSshHost(String),
+    /// 新建终端弹窗里的一台已检测 shell（旧壳 `ProfileRow::Shell`）。
+    LaunchShell(crate::shell_detect::DetectedShell),
+    /// 设置页“导入终端目录”落盘的可执行文件快照。
+    LaunchProfile(crate::config::ui_config::Profile),
+}
+
 const PALETTE_SEARCH_HEIGHT: f32 = 48.0;
 
 /// 命令面板 / Shell 选择弹窗里图标轨的逻辑边长。品牌贴图、Nerd Font 字形
@@ -37,6 +66,15 @@ impl NebulaWorkspace {
         cx: &mut Context<Self>,
     ) {
         match action {
+            WorkspacePaletteAction::TerminalAssistant => {
+                self.dismiss_palette_state();
+                if let Some(view) =
+                    self.tabs.get(self.active).and_then(WorkspaceTab::focused_view).cloned()
+                {
+                    view.update(cx, |view, cx| view.open_assistant_default(window, cx));
+                }
+                cx.notify();
+            },
             WorkspacePaletteAction::TerminalReading { commands } => {
                 self.dismiss_palette_state();
                 if let Some(view) =
@@ -171,6 +209,19 @@ impl NebulaWorkspace {
                 .collect();
             rows.push(recipes::palette_row(language));
             if self.tabs.get(self.active).and_then(WorkspaceTab::focused_view).is_some() {
+                let label = language.text(crate::i18n::Message::AssistantTitle).to_owned();
+                rows.push(WorkspacePaletteRow {
+                    group_order: 0,
+                    group: label.clone(),
+                    search: format!("{label} ai assistant explain command logs fix 解释 日志 纠错"),
+                    label,
+                    hint: String::new(),
+                    hint_style: WorkspacePaletteHintStyle::Metadata,
+                    action: WorkspacePaletteAction::TerminalAssistant,
+                    icon: None,
+                    icon_glyph: None,
+                    icon_path: None,
+                });
                 for (commands, message) in [
                     (false, crate::i18n::Message::TerminalReadingOpen),
                     (true, crate::i18n::Message::TerminalReadingChoose),

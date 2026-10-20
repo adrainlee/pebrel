@@ -19,3 +19,5 @@
 - SSH Files 的 pane cwd 跟随、手动浏览快照与取消归属见 [`remote_files`](../architecture/notes/nebula_app/gpui_shell/workspace/remote_files/)。
 - Windows Acrylic 的运行库回退与窗口生命周期见 [`platform`](../architecture/notes/nebula_app/platform/2026-09-22-acrylic-controller.md)。
 - Windows Acrylic 的动画期间透明回退与计时边界见 [`窗口状态切换`](../architecture/notes/nebula_app/platform/2026-09-22-acrylic-window-transitions.md)。
+
+- Runtime API discovery and transport limits: [`runtime_api`](../architecture/notes/nebula_app/runtime_api/). Terminal event admission: [`terminal`](../architecture/notes/nebula_app/gpui_shell/terminal/). Document image loading: [`file_editor`](../architecture/notes/nebula_app/gpui_shell/file_editor/). Assistant context redaction: [`ai_assistant`](../architecture/notes/nebula_app/ai_assistant/).

@@ -164,6 +164,7 @@ impl TerminalView {
         exit_code: Option<i32>,
         cx: &mut Context<Self>,
     ) {
+        self.observe_assistant_failure(cx);
         let choose_codex_session = self.codex_restore_target_missing(exit_code);
         self.notify_command_done(exit_code, cx);
         self.last_command_failed = exit_code.is_some_and(|code| code != 0);

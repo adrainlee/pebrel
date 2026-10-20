@@ -15,7 +15,7 @@ impl Render for NebulaWorkspace {
         // 「各写一份」，主题在这一帧中途换掉就会出现半旧半新的卡缝。
         let card_style = crate::gpui_shell::theme::PaneCardStyle::current(cx);
         let titlebar_background = self.titlebar_background.clone();
-        let draw_file_divider = self.side_panel.open;
+        let draw_file_divider = self.side_panel.open || self.assistant_dock_visible();
         let sidebar_logo_target_px =
             (TAB_LABEL_ICON_SIZE * window.scale_factor()).round().max(1.0) as u32;
         if let Some(images) = logos::poll_sidebar_logo_images(self, sidebar_logo_target_px, cx) {
@@ -348,7 +348,11 @@ impl Render for NebulaWorkspace {
                             ),
                     )
                     .when(!reader_focus, |row| {
-                        row.child(self.render_side_panel_slot(window, cx))
+                        if self.assistant_dock_visible() {
+                            row.child(self.render_assistant_dock(window, cx))
+                        } else {
+                            row.child(self.render_side_panel_slot(window, cx))
+                        }
                     }),
             )
             .when_some(dock_preview, |root, (x, y, w, h)| {

@@ -704,6 +704,7 @@ impl NebulaWorkspace {
                 title_bar_panel_controls()
                     .gap(px(8.0))
                     .child(self.render_terminal_find_button(settings_active, cx))
+                    .child(self.render_terminal_assistant_button(settings_active, cx))
                     .child(
                         toolbar_button(
                             "top-toggle-command-manager",

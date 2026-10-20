@@ -3,6 +3,8 @@
 #[cfg(all(test, feature = "gpui-test-support"))]
 mod activity_tests;
 mod agent_activity;
+mod assistant;
+pub(in crate::gpui_shell) use assistant::dock::AssistantPanel;
 mod broadcast;
 mod completion;
 #[cfg(all(test, feature = "gpui-test-support"))]
@@ -161,6 +163,9 @@ fn ui_language() -> crate::display::UiLanguage {
 
 /// 终端视图对宿主（Panel/Workspace）暴露的状态变化。
 pub enum TerminalViewEvent {
+    AssistantChanged,
+    AssistantVisibility(bool),
+    AssistantSettings,
     /// OSC 标题变化，宿主应刷新 Tab 标题。
     TitleChanged,
     /// Newly confirmed native recovery metadata must reach a checkpoint promptly.
@@ -267,6 +272,7 @@ pub enum SidebarActivity {
 }
 
 pub struct TerminalView {
+    assistant: assistant::Assistant,
     pub(super) answers: crate::assistant_answer::AnswerInbox,
     confirmation: super::confirmation::ConfirmationState,
     pub(super) answer_reader: Option<gpui::Entity<super::answer_reader::AnswerReader>>,
@@ -743,6 +749,7 @@ impl TerminalView {
 
     /// `Exited` 只对宿主发一次；重复的退出信号（ChildExit 之后必然跟 Exit）只更新文案。
     fn mark_exited(&mut self, message: String, cx: &mut Context<Self>) {
+        self.assistant.cancel();
         self.clear_output_hover(cx);
         self.reading.cancel_query();
         self.reading.cancel_copy();

@@ -415,33 +415,7 @@ const PALETTE_FILTER_BAR_HEIGHT: f32 = 44.0;
 const PALETTE_ROW_GAP: f32 = 4.0;
 const PALETTE_SCROLLBAR_CONTENT_GUTTER: f32 = 16.0;
 
-#[derive(Clone)]
-enum WorkspacePaletteAction {
-    TerminalReading {
-        commands: bool,
-    },
-    Shared(crate::display::command_palette::PaletteAction),
-    /// 聚焦已经存在的工作区标签，不创建副本。
-    FocusTab(usize),
-    LayoutRecipes,
-    /// 先激活标签，再把焦点交给其中的明确 pane。
-    FocusPane {
-        tab: usize,
-        pane: u64,
-    },
-    /// 在 frecency 目录中新建终端；已有目录中的 pane 由上面的 FocusPane 命中。
-    OpenDirectory(std::path::PathBuf),
-    RunAiSession {
-        command: String,
-        cwd: Option<std::path::PathBuf>,
-    },
-    /// 启动器混排的 SSH 主机行（数据源 = 共享主机列表权威）。
-    LaunchSshHost(String),
-    /// 新建终端弹窗里的一台已检测 shell（旧壳 `ProfileRow::Shell`）。
-    LaunchShell(crate::shell_detect::DetectedShell),
-    /// 设置页“导入终端目录”落盘的可执行文件快照。
-    LaunchProfile(crate::config::ui_config::Profile),
-}
+use palette::WorkspacePaletteAction;
 
 #[derive(Clone, Copy)]
 enum WorkspacePaletteHintStyle {
@@ -2176,6 +2150,7 @@ impl NebulaWorkspace {
         view: crate::display::side_panel::PanelView,
         cx: &mut Context<Self>,
     ) {
+        self.set_assistant_dock(false, cx);
         if !self.side_panel.open {
             self.toggle_side_panel(view, cx);
             return;

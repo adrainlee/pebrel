@@ -131,6 +131,7 @@ impl NebulaWorkspace {
         let language = workspace_ui_language();
         let copy_cwd = super::tab_menu::copy_working_directory_item(&source, cx);
         let source_entity_id = source.entity_id();
+        let assistant_source = source.downgrade();
         let paste_source = source.downgrade();
         let source = source.downgrade();
         let copy_item = PopupMenuItem::new(language.text(crate::i18n::Message::CommonCopy))
@@ -151,6 +152,32 @@ impl NebulaWorkspace {
                 }
             });
         let mut items = vec![copy_item, paste_item, copy_cwd, PopupMenuItem::separator()];
+        for (kind, label) in [
+            (
+                crate::ai_assistant::analysis::AnalysisKind::Explain,
+                crate::i18n::Message::AssistantExplain,
+            ),
+            (
+                crate::ai_assistant::analysis::AnalysisKind::Logs,
+                crate::i18n::Message::AssistantLogs,
+            ),
+        ] {
+            let target = assistant_source.clone();
+            let selected = selection.clone();
+            items.push(
+                PopupMenuItem::new(language.text(label))
+                    .icon(IconName::Star)
+                    .disabled(selected.is_empty())
+                    .on_click(move |_, window, cx| {
+                        if let Some(target) = target.upgrade() {
+                            target.update(cx, |view, cx| {
+                                view.open_assistant(kind, Some(selected.clone()), window, cx)
+                            });
+                        }
+                    }),
+            );
+        }
+        items.push(PopupMenuItem::separator());
         for (label, icon, direction) in [
             (
                 crate::i18n::Message::TabMenuSplitLeftRight,

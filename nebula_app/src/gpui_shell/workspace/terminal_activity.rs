@@ -19,6 +19,18 @@ impl NebulaWorkspace {
         cx: &mut Context<Self>,
     ) {
         match event {
+            TerminalViewEvent::AssistantChanged => cx.notify(),
+            TerminalViewEvent::AssistantVisibility(open) => {
+                if self
+                    .tabs
+                    .get(self.active)
+                    .and_then(WorkspaceTab::focused_view)
+                    .is_some_and(|active| active.entity_id() == view.entity_id())
+                {
+                    self.set_assistant_dock(*open, cx);
+                }
+            },
+            TerminalViewEvent::AssistantSettings => self.open_assistant_settings(window, cx),
             TerminalViewEvent::SessionIdentityChanged => {
                 if let Err(error) = windowing::save_current_window_session(
                     self.runtime_window_id,

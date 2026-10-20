@@ -264,6 +264,7 @@ impl TerminalView {
         ];
 
         let mut view = Self {
+            assistant: Default::default(),
             pane_id,
             session,
             focus_handle,

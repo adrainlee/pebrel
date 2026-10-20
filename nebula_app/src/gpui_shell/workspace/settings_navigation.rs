@@ -136,7 +136,9 @@ impl NebulaWorkspace {
         self.sync_settings_layout(tab_reveal_instant(cx));
         let restore_panel = std::mem::take(&mut self.settings_restore_side_panel_open);
         if restore_panel && !self.side_panel.open {
+            let assistant = self.assistant_dock_visible();
             self.toggle_side_panel(self.side_panel.view, cx);
+            self.set_assistant_dock(assistant, cx);
         }
         self.focus_active(window, cx);
         cx.notify();

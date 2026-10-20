@@ -98,6 +98,33 @@ fn title_bar_frame() -> gpui::Div {
 }
 
 impl NebulaWorkspace {
+    pub(super) fn render_terminal_assistant_button(
+        &self,
+        settings_active: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui_component::button::Button {
+        let language = crate::gpui_shell::config::ui_language(cx);
+        let view = self.tabs.get(self.active).and_then(WorkspaceTab::focused_view);
+        Button::new("terminal-assistant-toggle")
+            .icon(IconName::Star)
+            .label(language.text(Message::AssistantTitle))
+            .small()
+            .ghost()
+            .h(px(32.0))
+            .flex_shrink_0()
+            .debug_selector(|| "terminal-assistant-toggle".into())
+            .disabled(settings_active || view.is_none())
+            .selected(
+                self.assistant_dock_visible()
+                    || view.is_some_and(|v| v.read(cx).assistant_has_advice()),
+            )
+            .aria_label(language.text(Message::AssistantTitle))
+            .tooltip(language.text(Message::AssistantTitle))
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.toggle_assistant_dock(window, cx);
+            }))
+    }
+
     pub(super) fn render_terminal_find_button(
         &self,
         settings_active: bool,

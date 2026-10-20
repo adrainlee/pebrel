@@ -6,6 +6,7 @@ use crate::display::side_panel::PanelView;
 use crate::gpui_shell::file_editor::{DocumentDetails, DocumentSection, TextFileView};
 use crate::gpui_shell::widgets::toolbar_button;
 use crate::i18n::Message;
+mod assistant;
 
 #[cfg(all(test, feature = "gpui-test-support"))]
 #[path = "details_panel_tests.rs"]
@@ -18,6 +19,7 @@ const RESIZE_HIT_WIDTH: f32 = 8.0;
 const HEADER_CONTROL_SIZE: f32 = 32.0;
 
 pub(super) struct DetailsPanelState {
+    assistant: assistant::AssistantDock,
     pub(super) section: Option<DocumentSection>,
     width: f32,
     closing_width: Option<f32>,
@@ -31,6 +33,7 @@ pub(super) struct DetailsPanelState {
 impl Default for DetailsPanelState {
     fn default() -> Self {
         Self {
+            assistant: assistant::AssistantDock::default(),
             section: Some(DocumentSection::Outline),
             width: DEFAULT_WIDTH,
             closing_width: None,
@@ -56,6 +59,7 @@ impl NebulaWorkspace {
         view: crate::display::side_panel::PanelView,
         cx: &mut Context<Self>,
     ) {
+        self.details_panel.assistant.open = false;
         self.side_panel_anim_armed = !tab_reveal_instant(cx);
         self.side_panel.toggle(view);
         self.file_tree_menu = None;
@@ -409,7 +413,11 @@ impl NebulaWorkspace {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        if !self.side_panel.open || self.reader_focus_active(cx) || self.settings_open {
+        if !self.side_panel.open
+            || self.reader_focus_active(cx)
+            || self.settings_open
+            || self.assistant_dock_visible()
+        {
             return None;
         }
         let width = if self.details_panel.resize.is_some() {

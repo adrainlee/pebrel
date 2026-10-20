@@ -3,6 +3,18 @@ use super::*;
 mod key;
 
 impl SettingsPane {
+    pub(in crate::gpui_shell) fn show_providers(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings_search_input.update(cx, |input, cx| input.set_value("", window, cx));
+        self.active_section = 3;
+        self.about_sponsor_open = false;
+        self.search_origin_section = None;
+        cx.notify();
+    }
+
     pub(super) fn active_provider_index(&self) -> Option<usize> {
         self.provider_store
             .providers
@@ -389,6 +401,7 @@ impl SettingsPane {
         }
 
         self.group(language.pick("供应商", "Providers"), cx)
+            .debug_selector(|| "assistant-provider-settings".into())
             .child(
                 h_flex()
                     .w_full()
