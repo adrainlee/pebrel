@@ -202,3 +202,15 @@ fn ssh_exit_and_failure_cancel_pending_forward_and_hide_remote_actions(cx: &mut 
         });
     }
 }
+
+#[gpui::test]
+fn terminal_delivery_failure_shuts_down_transport_and_marks_view_exited(cx: &mut TestAppContext) {
+    let (view, window, receiver) = open(cx);
+    view.update(window, |view, cx| {
+        view.process_event(TermEvent::PtyFailure("fixture event queue overflow".into()), cx);
+        assert!(matches!(receiver.try_recv().unwrap(), Msg::Shutdown));
+        assert!(view.exited.as_ref().unwrap().contains("fixture event queue overflow"));
+        view.process_event(TermEvent::Exit, cx);
+        assert!(receiver.try_recv().is_err());
+    });
+}

@@ -1,17 +1,34 @@
-//! Coalesce repaint wakeups before enqueueing; retain every semantic event.
+//! Bounded non-blocking delivery: preserve semantic order or fail the session explicitly.
 
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
 use futures::{Stream, channel::mpsc};
 use nebula_terminal::event::Event;
 
+const MAX_EVENTS: usize = 4096;
+const MAX_BYTES: usize = 32 * 1024 * 1024;
+const BELL_INTERVAL: Duration = Duration::from_millis(100);
+
+type QueuedEvent = (Event, usize);
+
+#[derive(Default)]
+struct Budget {
+    events: usize,
+    bytes: usize,
+    failed: bool,
+    last_bell: Option<Instant>,
+}
+
 #[derive(Clone)]
 pub(super) struct EventSender {
-    sender: mpsc::UnboundedSender<Event>,
+    sender: mpsc::UnboundedSender<QueuedEvent>,
     wake_pending: Arc<AtomicBool>,
+    bell_pending: Arc<AtomicBool>,
+    budget: Arc<Mutex<Budget>>,
     pub(super) native_prompt: NativePromptState,
 }
 
@@ -27,20 +44,26 @@ pub(super) struct NativePrompt {
 }
 
 pub(super) struct EventReceiver {
-    receiver: mpsc::UnboundedReceiver<Event>,
+    receiver: mpsc::UnboundedReceiver<QueuedEvent>,
     wake_pending: Arc<AtomicBool>,
+    bell_pending: Arc<AtomicBool>,
+    budget: Arc<Mutex<Budget>>,
 }
 
 pub(super) fn channel() -> (EventSender, EventReceiver) {
     let (sender, receiver) = mpsc::unbounded();
     let wake_pending = Arc::new(AtomicBool::new(false));
+    let bell_pending = Arc::new(AtomicBool::new(false));
+    let budget = Arc::new(Mutex::new(Budget::default()));
     (
         EventSender {
             sender,
             wake_pending: wake_pending.clone(),
+            bell_pending: bell_pending.clone(),
+            budget: budget.clone(),
             native_prompt: NativePromptState::default(),
         },
-        EventReceiver { receiver, wake_pending },
+        EventReceiver { receiver, wake_pending, bell_pending, budget },
     )
 }
 
@@ -122,29 +145,84 @@ impl EventSender {
         {
             self.native_prompt.observe_prompt();
         }
-        let wake = matches!(event, Event::Wakeup);
-        if wake && self.wake_pending.swap(true, Ordering::AcqRel) {
+        let pending = match event {
+            Event::Wakeup => Some(&self.wake_pending),
+            Event::Bell => Some(&self.bell_pending),
+            _ => None,
+        };
+        if pending.is_some_and(|pending| pending.swap(true, Ordering::AcqRel)) {
             return;
         }
-        if self.sender.unbounded_send(event).is_err() && wake {
-            self.wake_pending.store(false, Ordering::Release);
+        let mut budget = self.budget.lock().unwrap();
+        if budget.failed || self.sender.is_closed() {
+            return;
+        }
+        if matches!(event, Event::Bell) {
+            if budget.last_bell.is_some_and(|last| last.elapsed() < BELL_INTERVAL) {
+                self.bell_pending.store(false, Ordering::Release);
+                return;
+            }
+            budget.last_bell = Some(Instant::now());
+        }
+        let bytes = event_bytes(&event);
+        if budget.events >= MAX_EVENTS || bytes > MAX_BYTES.saturating_sub(budget.bytes) {
+            budget.failed = true;
+            // Reserve two small control messages beyond the ordinary budget.
+            // Blocking here can deadlock: the producer may hold the terminal lock.
+            self.enqueue(
+                &mut budget,
+                Event::PtyFailure("terminal event queue exceeded its resource limit".into()),
+            );
+            self.enqueue(&mut budget, Event::Exit);
+            return;
+        }
+        self.enqueue(&mut budget, event);
+    }
+
+    fn enqueue(&self, budget: &mut Budget, event: Event) {
+        let bytes = event_bytes(&event);
+        if self.sender.unbounded_send((event, bytes)).is_ok() {
+            budget.events += 1;
+            budget.bytes += bytes;
         }
     }
 }
 
+fn event_bytes(event: &Event) -> usize {
+    let payload = match event {
+        Event::Title(s)
+        | Event::CwdReport(s)
+        | Event::Notify(s)
+        | Event::PtyWrite(s)
+        | Event::PtyFailure(s)
+        | Event::ClipboardStore(_, s) => s.capacity(),
+        Event::UserVar { name, value } => name.capacity().saturating_add(value.capacity()),
+        Event::InlineImage { data, .. } => data.capacity(),
+        Event::AiHookEnvelope(data) => data.capacity(),
+        _ => 0,
+    };
+    std::mem::size_of::<QueuedEvent>().saturating_add(payload)
+}
+
 impl EventReceiver {
-    fn acknowledge(&self, event: &Event) {
+    fn acknowledge(&self, (event, bytes): QueuedEvent) -> Event {
+        let mut budget = self.budget.lock().unwrap();
+        budget.events -= 1;
+        budget.bytes -= bytes;
+        if matches!(event, Event::Bell) {
+            self.bell_pending.store(false, Ordering::Release);
+        }
         if matches!(event, Event::Wakeup) {
             // Clear before processing: output arriving during UI work must
             // still enqueue a subsequent repaint, even on an inactive tab.
             self.wake_pending.store(false, Ordering::Release);
         }
+        event
     }
 
     pub(super) fn try_recv(&mut self) -> Result<Event, mpsc::TryRecvError> {
         let event = self.receiver.try_recv()?;
-        self.acknowledge(&event);
-        Ok(event)
+        Ok(self.acknowledge(event))
     }
 }
 
@@ -152,10 +230,7 @@ impl Stream for EventReceiver {
     type Item = Event;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Event>> {
         let result = Pin::new(&mut self.receiver).poll_next(cx);
-        if let Poll::Ready(Some(event)) = &result {
-            self.acknowledge(event);
-        }
-        result
+        result.map(|event| event.map(|event| self.acknowledge(event)))
     }
 }
 
@@ -222,5 +297,47 @@ mod tests {
         assert!(matches!(receiver.try_recv().unwrap(), Event::Wakeup));
         assert!(matches!(receiver.try_recv().unwrap(), Event::Exit));
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn bell_flood_is_coalesced_and_semantic_events_keep_order() {
+        let (sender, mut receiver) = channel();
+        sender.send(Event::CommandStart);
+        for _ in 0..200_000 {
+            sender.send(Event::Bell);
+        }
+        sender.send(Event::CommandDone { exit_code: Some(1) });
+        assert_eq!(sender.budget.lock().unwrap().events, 3);
+        assert!(matches!(receiver.try_recv().unwrap(), Event::CommandStart));
+        assert!(matches!(receiver.try_recv().unwrap(), Event::Bell));
+        assert!(matches!(receiver.try_recv().unwrap(), Event::CommandDone { .. }));
+        assert_eq!(sender.budget.lock().unwrap().bytes, 0);
+    }
+
+    #[test]
+    fn semantic_overflow_is_bounded_and_ends_with_explicit_failure() {
+        let (sender, mut receiver) = channel();
+        for _ in 0..MAX_EVENTS * 3 {
+            sender.send(Event::CommandStart);
+        }
+        assert_eq!(sender.budget.lock().unwrap().events, MAX_EVENTS + 2);
+        for _ in 0..MAX_EVENTS {
+            assert!(matches!(receiver.try_recv().unwrap(), Event::CommandStart));
+        }
+        assert!(matches!(receiver.try_recv().unwrap(), Event::PtyFailure(_)));
+        assert!(matches!(receiver.try_recv().unwrap(), Event::Exit));
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(sender.budget.lock().unwrap().bytes, 0);
+    }
+
+    #[test]
+    fn payload_capacity_counts_and_oversized_event_never_enters_queue() {
+        let (sender, mut receiver) = channel();
+        sender.send(Event::AiHookEnvelope(Vec::with_capacity(MAX_BYTES + 1)));
+        assert!(sender.budget.lock().unwrap().bytes < 1024);
+        assert!(matches!(receiver.try_recv().unwrap(), Event::PtyFailure(_)));
+        assert!(matches!(receiver.try_recv().unwrap(), Event::Exit));
+        drop(sender);
+        assert!(futures::executor::block_on(futures::StreamExt::next(&mut receiver)).is_none());
     }
 }

@@ -644,6 +644,7 @@ impl TerminalView {
                 self.mark_exited(format!("进程已退出（{code:?}）"), cx);
             },
             TermEvent::PtyFailure(reason) => {
+                self.shutdown();
                 self.mark_exited(format!("PTY 故障：{reason}"), cx);
             },
             TermEvent::Exit => {
