@@ -2,7 +2,10 @@
 #[cfg(all(windows, feature = "video-background"))]
 #[path = "animated/native.rs"]
 mod implementation;
-#[cfg(not(all(windows, feature = "video-background")))]
+#[cfg(all(not(windows), feature = "video-background"))]
 #[path = "animated/av_player.rs"]
+mod implementation;
+#[cfg(not(feature = "video-background"))]
+#[path = "animated/unavailable.rs"]
 mod implementation;
 pub(super) use implementation::*;

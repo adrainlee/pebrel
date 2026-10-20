@@ -52,7 +52,7 @@ pub mod startup;
 #[cfg(unix)]
 pub(crate) mod tray_native;
 pub(crate) mod update_installation;
-#[cfg(feature = "gpui-shell")]
+#[cfg(all(feature = "gpui-shell", feature = "video-background"))]
 pub(crate) mod video_underlay;
 #[cfg(feature = "gpui-shell")]
 pub(crate) mod window_capture;
