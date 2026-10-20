@@ -7,13 +7,16 @@ use crate::gpui_shell::prelude::InputState;
 use nebula_terminal::term::reading::{CompletedCommand, ReadingPoint};
 
 mod chrome;
+mod command;
 pub(super) mod dock;
+mod models;
 mod query;
 #[cfg(all(test, feature = "gpui-test-support"))]
 mod tests;
 
 #[derive(Default)]
 pub(super) struct Assistant {
+    models: models::Selection,
     panel: Option<Panel>,
     auto: bool,
     generation: u64,
@@ -54,6 +57,7 @@ struct Panel {
     status: Status,
     result_epoch: u64,
     copied: bool,
+    command_scope: Option<command::Scope>,
 }
 
 enum Status {
@@ -63,6 +67,10 @@ enum Status {
     Ready(AnalysisResult),
     Error(AnalysisError),
     Inserted,
+    Submitting,
+    Submitted,
+    CommandUnavailable,
+    SubmitFailed,
 }
 
 impl Assistant {
@@ -71,8 +79,11 @@ impl Assistant {
         self.task = None;
         self.query_cancellation = None;
         self.automatic_pending = false;
+        if let Some(panel) = &mut self.panel {
+            panel.command_scope = None;
+        }
         if let Some(panel) = &mut self.panel
-            && matches!(panel.status, Status::Loading | Status::Querying)
+            && matches!(panel.status, Status::Loading | Status::Querying | Status::Submitting)
         {
             panel.status = Status::Idle;
         }
@@ -85,6 +96,7 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.assistant.models.refresh();
         if let Some(panel) = &self.assistant.panel {
             window.focus(&panel.input.focus_handle(cx), cx);
             cx.emit(TerminalViewEvent::AssistantVisibility(true));
@@ -133,12 +145,13 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.assistant.models.refresh();
         self.assistant.cancel();
         self.clear_output_hover(cx);
         let failure_request =
             (kind == AnalysisKind::Failure).then(|| self.assistant_failure_request(cx)).flatten();
         let text = match kind {
-            AnalysisKind::Chat => selection.unwrap_or_default(),
+            AnalysisKind::Command | AnalysisKind::Chat => selection.unwrap_or_default(),
             AnalysisKind::Explain => selection.unwrap_or_else(|| {
                 self.completion_editor
                     .snapshot(self.prompt_input_epoch)
@@ -159,7 +172,10 @@ impl TerminalView {
         };
         let text = analysis::redacted_tail(&text, analysis::MAX_CONTEXT_BYTES);
         let input = cx.new(|cx| {
-            let mut input = InputState::new(window, cx).multi_line(true).soft_wrap(true);
+            let mut input = InputState::new(window, cx)
+                .multi_line(true)
+                .soft_wrap(true)
+                .submit_on_enter(kind == AnalysisKind::Command);
             input.set_value(text, window, cx);
             input
         });
@@ -167,16 +183,48 @@ impl TerminalView {
             &input,
             window,
             |view, input, event: &gpui_component::input::InputEvent, window, cx| {
-                if matches!(
-                    event,
-                    gpui_component::input::InputEvent::PressEnter { secondary: true, .. }
-                ) && view
-                    .assistant
-                    .panel
-                    .as_ref()
-                    .is_some_and(|panel| panel.input.entity_id() == input.entity_id())
+                let submit = match event {
+                    gpui_component::input::InputEvent::PressEnter { secondary, shift } => {
+                        *secondary
+                            || !*shift
+                                && view
+                                    .assistant
+                                    .panel
+                                    .as_ref()
+                                    .is_some_and(|panel| panel.kind == AnalysisKind::Command)
+                    },
+                    _ => false,
+                };
+                if submit
+                    && view
+                        .assistant
+                        .panel
+                        .as_ref()
+                        .is_some_and(|panel| panel.input.entity_id() == input.entity_id())
                 {
                     view.send_assistant(window, cx);
+                    return;
+                }
+                if matches!(event, gpui_component::input::InputEvent::Change)
+                    && view.assistant.panel.as_ref().is_some_and(|panel| {
+                        panel.input.entity_id() == input.entity_id()
+                            && panel.kind == AnalysisKind::Command
+                    })
+                {
+                    // Change notifications may be delivered after the Enter
+                    // submission in the same event turn. Only a different
+                    // description revokes the request that was just captured.
+                    if view.assistant.last_request.as_ref().is_some_and(|request| {
+                        request.kind == AnalysisKind::Command
+                            && request.command == input.read(cx).value().trim()
+                    }) {
+                        return;
+                    }
+                    view.assistant.cancel();
+                    let panel = view.assistant.panel.as_mut().unwrap();
+                    panel.status = Status::Idle;
+                    panel.copied = false;
+                    cx.notify();
                     return;
                 }
                 if matches!(event, gpui_component::input::InputEvent::Change)
@@ -219,12 +267,16 @@ impl TerminalView {
             status,
             result_epoch,
             copied: false,
+            command_scope: None,
         });
         cx.notify();
     }
 
     fn assistant_context(&self, kind: AnalysisKind, cx: &App) -> AnalysisRequest {
         let shell = match &self.session_launch {
+            _ if !self.suggest.suggest_env.is_this_machine() => {
+                "remote or guest shell (OS and dialect unknown)"
+            },
             crate::session::LaunchSession::Shell { program, .. } => program.as_str(),
             crate::session::LaunchSession::Default => "default shell",
             crate::session::LaunchSession::Profile { name, .. } => name.as_str(),
@@ -244,6 +296,7 @@ impl TerminalView {
             language: format!("{:?}", crate::gpui_shell::config::ui_language(cx)),
             history: Vec::new(),
             query_scope: None,
+            provider: self.assistant.models.provider().cloned(),
         }
     }
 
@@ -262,7 +315,7 @@ impl TerminalView {
 
     fn submit_assistant(&mut self, cx: &mut Context<Self>) {
         let Some(panel) = &self.assistant.panel else { return };
-        if matches!(panel.status, Status::Loading | Status::Querying) {
+        if matches!(panel.status, Status::Loading | Status::Querying | Status::Submitting) {
             return;
         }
         let text = panel.input.read(cx).value().to_string();
@@ -277,7 +330,8 @@ impl TerminalView {
         } else {
             self.assistant_context(panel.kind, cx)
         };
-        if matches!(panel.kind, AnalysisKind::Explain | AnalysisKind::Chat) {
+        if matches!(panel.kind, AnalysisKind::Command | AnalysisKind::Explain | AnalysisKind::Chat)
+        {
             request.command = text.trim().to_owned();
         } else {
             request.output = text;
@@ -290,7 +344,7 @@ impl TerminalView {
 
     fn send_assistant(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(panel) = &self.assistant.panel else { return };
-        if matches!(panel.status, Status::Loading | Status::Querying) {
+        if matches!(panel.status, Status::Loading | Status::Querying | Status::Submitting) {
             return;
         }
         let input = panel.input.clone();
@@ -310,7 +364,33 @@ impl TerminalView {
         automatic: bool,
         cx: &mut Context<Self>,
     ) {
+        request.provider = match self.assistant.models.request_provider() {
+            Ok(provider) => provider,
+            Err(error) => {
+                self.assistant.cancel();
+                if let Some(panel) = &mut self.assistant.panel {
+                    panel.status = Status::Error(error);
+                }
+                cx.notify();
+                return;
+            },
+        };
+        let command_scope = if request.kind == AnalysisKind::Command {
+            let Some(scope) = self.assistant_command_scope(cx) else {
+                if let Some(panel) = &mut self.assistant.panel {
+                    panel.status = Status::CommandUnavailable;
+                }
+                cx.notify();
+                return;
+            };
+            Some(scope)
+        } else {
+            None
+        };
         self.assistant.cancel();
+        if let Some(panel) = &mut self.assistant.panel {
+            panel.command_scope = command_scope;
+        }
         self.assistant.query_target =
             if !automatic && matches!(request.kind, AnalysisKind::Chat | AnalysisKind::Logs) {
                 self.assistant_query_target()
@@ -363,6 +443,19 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         if self.assistant.generation != generation || self.exited.is_some() {
+            return;
+        }
+        if self.assistant.panel.as_ref().is_some_and(|panel| {
+            panel.kind == AnalysisKind::Command
+                && !panel
+                    .command_scope
+                    .as_ref()
+                    .is_some_and(|scope| self.assistant_scope_matches(scope, cx))
+        }) && !automatic
+        {
+            self.assistant.task = None;
+            self.assistant.panel.as_mut().unwrap().status = Status::CommandUnavailable;
+            cx.notify();
             return;
         }
         let request =
@@ -440,24 +533,9 @@ impl TerminalView {
 
     fn assistant_can_insert(&self) -> bool {
         let Some(panel) = &self.assistant.panel else { return false };
-        if panel.result_epoch != self.prompt_input_epoch
-            || self.exited.is_some()
-            || self.command_running && !self.command_running_disproved
-            || self
-                .term_mode()
-                .intersects(TermMode::ALT_SCREEN | TermMode::VI | TermMode::KITTY_KEYBOARD_PROTOCOL)
-        {
-            return false;
-        }
-        let Some(session) = &self.session else { return false };
-        let term = session.term.lock();
-        crate::display::nebula_prompt_line_from_raw_grid(
-            &term,
-            term.grid().cursor.point,
-            &self.suggest.line_buf,
-            &self.suggest.suggest_env,
-        )
-        .is_some_and(|line| line.input.trim().is_empty())
+        panel.result_epoch == self.prompt_input_epoch
+            && self.assistant_prompt_input().is_some_and(|input| input.is_empty())
+            && self.suggest.line_buf.is_empty()
     }
 
     fn insert_assistant_command(&mut self, window: &mut Window, cx: &mut Context<Self>) {

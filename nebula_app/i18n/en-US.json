@@ -1489,6 +1489,16 @@
     "advanced_active": "Advanced effects · Terminal effects enabled"
   },
   "assistant": {
+    "select_model": "Choose an AI model",
+    "command_title": "Generate command",
+    "command_hint": "Type /ai and press Enter at a shell prompt to open this panel. Describe what you want to do, then press Enter to generate a command. Review it before confirming execution. Escape closes the panel.",
+    "command_generate": "Generate command",
+    "command_execute": "Confirm and run",
+    "command_target": "Run in current terminal: {target}",
+    "command_submitting": "Waiting for the shell to receive the command…",
+    "command_submitted": "Command submitted. View its output in the terminal.",
+    "command_unavailable": "The terminal context changed or the command line is busy. Return to an empty shell prompt and generate a new command.",
+    "command_submit_failed": "The shell did not confirm the command text. Enter was not sent. Check the terminal before continuing.",
     "completion": "AI command completion",
     "completion_hint": "After a command word and a space, pause to get a suggestion. Sends the input, directory, related history and previous advice to this provider when selected. Requires command suggestions to be enabled. Tab fills the command; Enter runs it.",
     "query_target": "Query target: {target}",

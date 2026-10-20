@@ -205,18 +205,26 @@ pub(crate) fn nebula_shell_ready_from_raw_grid<T: EventListener>(
     terminal: &Term<T>,
     env: &SuggestEnv,
 ) -> bool {
+    nebula_idle_prompt_from_raw_grid(terminal, env).is_some()
+}
+
+/// Return the recognized empty prompt without weakening the typed-input
+/// reconciliation contract. Callers can bind a later echo to this exact prompt.
+pub(crate) fn nebula_idle_prompt_from_raw_grid<T: EventListener>(
+    terminal: &Term<T>,
+    env: &SuggestEnv,
+) -> Option<String> {
     if let Some(line) =
         nebula_prompt_line_from_raw_grid(terminal, terminal.grid().cursor.point, "", env)
     {
-        return line.input.trim().is_empty();
+        return line.input.trim().is_empty().then_some(line.prompt);
     }
-    let Some(text) = raw_grid_logical_line(terminal, terminal.grid().cursor.point) else {
-        return false;
-    };
+    let text = raw_grid_logical_line(terminal, terminal.grid().cursor.point)?;
     let prompt = text.trim_end();
-    let Some(marker) = prompt.chars().next_back() else { return false };
-    safe_shell_prompt_marker(prompt, marker, env)
-        && (terminal.nebula_prompt_active() || likely_prompt(prompt, marker, env))
+    let marker = prompt.chars().next_back()?;
+    (safe_shell_prompt_marker(prompt, marker, env)
+        && (terminal.nebula_prompt_active() || likely_prompt(prompt, marker, env)))
+    .then(|| prompt.to_owned())
 }
 
 pub(crate) fn nebula_shell_prompt_restored_from_raw_grid<T: EventListener>(

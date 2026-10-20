@@ -103,6 +103,7 @@ impl TerminalView {
         stage: crate::ssh_session::SshStage,
         cx: &mut Context<Self>,
     ) {
+        self.invalidate_assistant_command();
         self.prediction_input();
         self.prediction.reset();
         self.ssh_stage = Some(stage.clone());

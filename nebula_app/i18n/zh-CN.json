@@ -1489,6 +1489,16 @@
     "advanced_active": "高级效果 · 终端效果已启用"
   },
   "assistant": {
+    "select_model": "选择 AI 模型",
+    "command_title": "生成命令",
+    "command_hint": "在终端输入 /ai 并按 Enter 打开此面板。描述你要做的操作，按 Enter 生成命令。检查命令后，再确认执行。Escape 关闭面板。",
+    "command_generate": "生成命令",
+    "command_execute": "确认执行",
+    "command_target": "在当前终端执行：{target}",
+    "command_submitting": "正在等待 Shell 接收命令…",
+    "command_submitted": "命令已提交，请在终端查看运行结果。",
+    "command_unavailable": "终端环境已变化或命令行正在使用。请回到空闲的 Shell 提示符后重新生成命令。",
+    "command_submit_failed": "Shell 未确认收到命令文本，尚未发送回车。请先检查终端再继续。",
     "completion": "AI 命令补全",
     "completion_hint": "输入命令单词和空格后，稍作停顿即可获取建议。选中此供应商时，将发送当前输入、目录、相关历史命令及先前建议。需同时开启命令建议。Tab 填入命令，Enter 执行。",
     "query_target": "查询目标：{target}",

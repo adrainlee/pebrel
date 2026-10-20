@@ -11,23 +11,32 @@ impl TerminalView {
         let panel = self.assistant.panel.as_ref()?;
         let language = crate::gpui_shell::config::ui_language(cx);
         let t = |m| language.text(m);
-        let pending = matches!(panel.status, Status::Loading | Status::Querying);
+        let command_mode = panel.kind == AnalysisKind::Command;
+        let pending =
+            matches!(panel.status, Status::Loading | Status::Querying | Status::Submitting);
         let mut conversation = v_flex().w_full().gap_3();
-        if self.assistant.history.is_empty() && matches!(panel.status, Status::Idle) {
+        if (command_mode || self.assistant.history.is_empty())
+            && matches!(panel.status, Status::Idle)
+        {
             conversation = conversation.child(
                 v_flex()
                     .gap_2()
                     .py_3()
-                    .child(div().font_semibold().child(t(Message::AssistantWelcome)))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(t(Message::AssistantWelcomeHint)),
-                    ),
+                    .child(div().font_semibold().child(t(if command_mode {
+                        Message::AssistantCommandTitle
+                    } else {
+                        Message::AssistantWelcome
+                    })))
+                    .child(div().text_sm().text_color(cx.theme().muted_foreground).child(t(
+                        if command_mode {
+                            Message::AssistantCommandHint
+                        } else {
+                            Message::AssistantWelcomeHint
+                        },
+                    ))),
             );
         }
-        for (index, turn) in self.assistant.history.iter().enumerate() {
+        for (index, turn) in self.assistant.history.iter().enumerate().filter(|_| !command_mode) {
             conversation = conversation.child(
                 v_flex()
                     .id(("assistant-turn", index))
@@ -101,13 +110,30 @@ impl TerminalView {
                 conversation =
                     conversation.child(div().text_sm().child(t(Message::AssistantInserted)));
             },
+            Status::Submitting => {
+                conversation = conversation
+                    .child(div().text_sm().child(t(Message::AssistantCommandSubmitting)));
+            },
+            Status::Submitted => {
+                conversation = conversation
+                    .child(div().text_sm().child(t(Message::AssistantCommandSubmitted)));
+            },
+            Status::CommandUnavailable => {
+                conversation = conversation
+                    .child(div().text_sm().child(t(Message::AssistantCommandUnavailable)));
+            },
+            Status::SubmitFailed => {
+                conversation = conversation
+                    .child(div().text_sm().child(t(Message::AssistantCommandSubmitFailed)));
+            },
             Status::Ready(result) => {
                 // Cached automatic advice has no manual conversation entry yet.
-                if self
-                    .assistant
-                    .history
-                    .last()
-                    .is_none_or(|turn| !turn.answer.starts_with(&result.analysis))
+                if command_mode
+                    || self
+                        .assistant
+                        .history
+                        .last()
+                        .is_none_or(|turn| !turn.answer.starts_with(&result.analysis))
                 {
                     conversation =
                         conversation.child(div().text_sm().child(result.analysis.clone()));
@@ -201,6 +227,25 @@ impl TerminalView {
                         })),
                 );
                 if let Some(command) = &result.command {
+                    if command_mode {
+                        let target = panel
+                            .command_scope
+                            .as_ref()
+                            .map(|scope| scope.label())
+                            .unwrap_or_default();
+                        conversation =
+                            conversation.child(div().text_xs().child(
+                                language.format(
+                                    Message::AssistantCommandTarget,
+                                    &[("target", &target)],
+                                ),
+                            ));
+                        if !self.assistant_can_execute(cx) {
+                            conversation = conversation.child(
+                                div().text_xs().child(t(Message::AssistantCommandUnavailable)),
+                            );
+                        }
+                    }
                     conversation = conversation.child(
                         div()
                             .text_sm()
@@ -212,6 +257,8 @@ impl TerminalView {
                             conversation.child(div().text_sm().child(t(Message::AssistantDanger)));
                     }
                     let copy_command = command.clone();
+                    let approved_command = command.clone();
+                    let generation = self.assistant.generation;
                     conversation = conversation.child(
                         h_flex()
                             .gap_2()
@@ -229,14 +276,42 @@ impl TerminalView {
                                     })),
                             )
                             .child(
-                                Button::new("assistant-insert")
-                                    .debug_selector(|| "assistant-insert".into())
-                                    .label(t(Message::AssistantInsert))
-                                    .small()
-                                    .disabled(!self.assistant_can_insert())
-                                    .on_click(cx.listener(|view, _, window, cx| {
-                                        view.insert_assistant_command(window, cx)
-                                    })),
+                                Button::new(if command_mode {
+                                    "assistant-execute"
+                                } else {
+                                    "assistant-insert"
+                                })
+                                .debug_selector(move || {
+                                    if command_mode {
+                                        "assistant-execute".into()
+                                    } else {
+                                        "assistant-insert".into()
+                                    }
+                                })
+                                .label(t(if command_mode {
+                                    Message::AssistantCommandExecute
+                                } else {
+                                    Message::AssistantInsert
+                                }))
+                                .small()
+                                .disabled(if command_mode {
+                                    !self.assistant_can_execute(cx)
+                                } else {
+                                    !self.assistant_can_insert()
+                                })
+                                .on_click(cx.listener(
+                                    move |view, _, window, cx| {
+                                        if command_mode {
+                                            view.execute_assistant_command(
+                                                generation,
+                                                &approved_command,
+                                                cx,
+                                            );
+                                        } else {
+                                            view.insert_assistant_command(window, cx);
+                                        }
+                                    },
+                                )),
                             ),
                     );
                 }
@@ -251,7 +326,9 @@ impl TerminalView {
         }
         composer = composer
             .child(div().text_xs().text_color(cx.theme().muted_foreground).child(t(
-                if panel.kind == AnalysisKind::Chat {
+                if command_mode {
+                    Message::AssistantCommandHint
+                } else if panel.kind == AnalysisKind::Chat {
                     Message::AssistantChatHint
                 } else {
                     Message::AssistantContextHint
@@ -269,7 +346,9 @@ impl TerminalView {
                     .child(
                         Button::new("assistant-analyze")
                             .debug_selector(|| "assistant-analyze".into())
-                            .label(t(if panel.kind == AnalysisKind::Chat {
+                            .label(t(if command_mode {
+                                Message::AssistantCommandGenerate
+                            } else if panel.kind == AnalysisKind::Chat {
                                 Message::AssistantSend
                             } else {
                                 Message::AssistantAnalyze
@@ -278,8 +357,10 @@ impl TerminalView {
                             .small()
                             .disabled(
                                 pending
-                                    || (panel.kind == AnalysisKind::Chat
-                                        && panel.input.read(cx).value().trim().is_empty()),
+                                    || (matches!(
+                                        panel.kind,
+                                        AnalysisKind::Command | AnalysisKind::Chat
+                                    ) && panel.input.read(cx).value().trim().is_empty()),
                             )
                             .on_click(
                                 cx.listener(|view, _, window, cx| view.send_assistant(window, cx)),
@@ -380,9 +461,11 @@ impl TerminalView {
                                 })),
                         ),
                 )
+                .child(div().px_3().pb_2().flex_shrink_0().child(self.assistant_model_picker(cx)))
                 .child(
                     h_flex().px_3().pb_2().gap_1().flex_wrap().flex_shrink_0().children(
                         [
+                            (AnalysisKind::Command, Message::AssistantCommandTitle),
                             (AnalysisKind::Chat, Message::AssistantChat),
                             (AnalysisKind::Explain, Message::AssistantExplain),
                             (AnalysisKind::Logs, Message::AssistantLogs),

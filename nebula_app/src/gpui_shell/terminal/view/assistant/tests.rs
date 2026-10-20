@@ -4,6 +4,8 @@ use gpui_component::Root;
 use nebula_terminal::event_loop::StreamProcessor;
 use std::sync::{Mutex, mpsc::Receiver};
 
+mod commands;
+mod models;
 mod queries;
 
 struct AssistantFixture {

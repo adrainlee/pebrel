@@ -567,6 +567,9 @@ impl TerminalView {
 
     pub(super) fn process_event(&mut self, event: TermEvent, cx: &mut Context<Self>) {
         let cwd_changed = cwd_report::apply(&mut self.cwd, &event);
+        if cwd_changed {
+            self.invalidate_assistant_command();
+        }
         // Both shell metadata channels update completion and directory history.
         if cwd_changed
             || ((matches!(&event, TermEvent::CwdReport(_))
@@ -1220,6 +1223,10 @@ impl TerminalView {
             && !mods.shift
             && self.marked_text.is_none()
             && !mode.intersects(TermMode::ALT_SCREEN | TermMode::VI);
+        if plain && ks.key == "enter" && self.open_ai_command(window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if plain && self.handle_completion_key(ks.key.as_str(), cx) {
             cx.notify();
             cx.stop_propagation();

@@ -11,6 +11,7 @@ fn context(kind: AnalysisKind) -> AnalysisRequest {
         language: "Chinese".into(),
         history: Vec::new(),
         query_scope: None,
+        provider: None,
     }
 }
 
@@ -29,6 +30,71 @@ fn context_is_bounded_redacted_and_keeps_remote_identity() {
     for limit in 0..12 {
         assert!(bounded_tail("中文😀hello", limit).len() <= limit);
     }
+}
+
+#[test]
+fn command_generation_keeps_the_natural_language_goal_and_requires_nonempty_input() {
+    let mut request = context(AnalysisKind::Command);
+    request.command = "Show the five largest files in the current folder".into();
+    request.output.clear();
+    let value: serde_json::Value = serde_json::from_str(&user_context(&request).unwrap()).unwrap();
+    assert_eq!(value["task"], "generate_command");
+    assert_eq!(value["command"], request.command);
+    assert_eq!(value["environment"], "remote SSH; OS unknown");
+    assert!(value["query_scope"].is_null());
+    request.command = "  ".into();
+    assert_eq!(user_context(&request), Err(AnalysisError::EmptyContext));
+}
+
+#[test]
+fn selected_provider_snapshot_controls_the_actual_endpoint_and_model() {
+    use crate::ai_providers::{AiProvider, ProviderKind};
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        let mut reader = BufReader::new(socket.try_clone().unwrap());
+        let mut route = String::new();
+        reader.read_line(&mut route).unwrap();
+        let mut length = 0;
+        loop {
+            let mut header = String::new();
+            reader.read_line(&mut header).unwrap();
+            if header == "\r\n" {
+                break;
+            }
+            if let Some(value) = header.to_ascii_lowercase().strip_prefix("content-length:") {
+                length = value.trim().parse::<usize>().unwrap();
+            }
+        }
+        assert!(length > 0 && length < 64 * 1024);
+        let mut body = vec![0; length];
+        reader.read_exact(&mut body).unwrap();
+        let response = serde_json::json!({"choices":[{"message":{"content":
+            "{\"analysis\":\"Selected model replied\",\"command\":null,\"danger\":false}"}}]})
+        .to_string();
+        write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
+        (route, serde_json::from_slice::<serde_json::Value>(&body).unwrap())
+    });
+    let mut provider = AiProvider::preset(ProviderKind::Ollama, "selected-only");
+    provider.base_url = format!("http://{address}/chosen-endpoint");
+    provider.full_url = true;
+    provider.model = "chosen-model".into();
+    let mut input = context(AnalysisKind::Chat);
+    input.provider = Some(provider);
+    assert_eq!(request(&input).unwrap().analysis, "Selected model replied");
+    let (route, body) = server.join().unwrap();
+    assert_eq!(route, "POST /chosen-endpoint HTTP/1.1\r\n");
+    assert_eq!(body["model"], "chosen-model");
+    assert!(
+        !body.to_string().contains("selected-only"),
+        "provider metadata is routing, not terminal context"
+    );
+    input.provider.as_mut().unwrap().enabled = false;
+    assert_eq!(request(&input), Err(AnalysisError::NoProvider));
 }
 
 #[test]
