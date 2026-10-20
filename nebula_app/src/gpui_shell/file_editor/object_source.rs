@@ -134,7 +134,7 @@ impl ObjectSource {
                     None
                 };
                 let address = file_path.as_deref().unwrap_or(input);
-                let rendered = super::images::flatten_local_image_url(address, base);
+                let rendered = address.to_owned();
                 let resource = image_resource(&rendered, base)?;
                 let preview_address = match &resource {
                     gpui::Resource::Uri(uri) => uri.as_ref(),

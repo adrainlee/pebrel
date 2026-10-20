@@ -13,7 +13,7 @@ mod edit_history;
 #[cfg(all(test, feature = "gpui-test-support"))]
 mod focus_tests;
 mod image_cache;
-mod images;
+mod image_loader;
 mod info;
 mod inline_edit;
 #[cfg(all(test, feature = "gpui-test-support"))]
@@ -438,7 +438,6 @@ impl TextFileView {
         self.content_revision = self.content_revision.wrapping_add(1);
         self.revision += 1;
         self.preview_task = None;
-        let path = self.path.clone();
         let source = self.source.clone();
         let operation = DocumentOperation::default();
         if let Some(previous) = self.operation.replace(operation.clone()) {
@@ -449,7 +448,7 @@ impl TextFileView {
         let task = cx.background_executor().spawn(async move {
             let _permit = resources.document_permit().await;
             source.load(operation).await.map(|doc| {
-                let outline = markdown.then(|| Outline::prepare(&doc.text, path.parent()));
+                let outline = markdown.then(|| Outline::parse(&doc.text));
                 (doc, outline)
             })
         });
@@ -597,15 +596,13 @@ impl TextFileView {
         let resources = super::scientific_render::assets(cx);
         self.preview_task = Some(cx.spawn(async move |this, cx| {
             executor.timer(Duration::from_millis(250)).await;
-            let Ok((source, path)) =
-                this.update(cx, |view, cx| (view.input.read(cx).value(), view.path.clone()))
-            else {
+            let Ok(source) = this.update(cx, |view, cx| view.input.read(cx).value()) else {
                 return;
             };
             let outline = executor
                 .spawn(async move {
                     let _permit = resources.document_permit().await;
-                    Outline::prepare(&source, path.parent())
+                    Outline::parse(&source)
                 })
                 .await;
             let _ = this.update(cx, |view, cx| {

@@ -31,6 +31,7 @@ pub mod file_drop;
 mod file_editor;
 mod file_preview;
 pub mod http;
+mod image_decode;
 pub mod math_view;
 mod molecule_view;
 mod motion;

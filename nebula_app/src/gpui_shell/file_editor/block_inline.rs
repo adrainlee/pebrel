@@ -139,29 +139,17 @@ mod tests {
     }
 
     #[test]
-    fn preparing_inline_images_keeps_source_offsets_and_uses_a_still_preview() {
-        let directory = tempfile::tempdir().unwrap();
-        let file = std::fs::File::create(directory.path().join("tiny.gif")).unwrap();
-        image::codecs::gif::GifEncoder::new(file)
-            .encode_frame(image::Frame::new(image::RgbaImage::from_pixel(
-                2,
-                2,
-                image::Rgba([0, 0, 0, 255]),
-            )))
-            .unwrap();
+    fn inline_images_keep_original_urls_and_source_offsets_for_bounded_loading() {
         let source = "Before ![alt](tiny.gif) after";
-        let outline = crate::gpui_shell::file_editor::outline::Outline::prepare(
-            source,
-            Some(directory.path()),
-        );
+        let outline = crate::gpui_shell::file_editor::outline::Outline::parse(source);
         let structure = outline.structures[0].as_ref().unwrap();
         let image = structure
             .parts
             .iter()
             .find(|part| &source[part.range.clone()] == "![alt](tiny.gif)")
             .unwrap();
-        let preview = image.preview.as_deref().unwrap();
-        assert!(preview.contains(".png)"), "{preview}");
+        assert!(image.preview.is_none());
+        assert_eq!(outline.block_source(0), source);
         assert_eq!(outline.source_ranges[0], 0..source.len());
     }
 

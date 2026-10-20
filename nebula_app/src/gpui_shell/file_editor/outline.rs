@@ -24,7 +24,6 @@ pub(super) struct Outline {
     pub(super) limited: bool,
     definitions: HashMap<String, (String, Vec<String>)>,
     image_definitions: HashMap<String, (String, Option<String>)>,
-    image_targets: HashMap<String, String>,
     references: Vec<Vec<String>>,
     pub(super) source_ranges: Vec<std::ops::Range<usize>>,
     pub(super) structures: Vec<Option<std::sync::Arc<super::block_structure::BlockStructure>>>,
@@ -58,35 +57,6 @@ impl Outline {
 
     pub(super) fn heading_level(&self, block: usize) -> Option<u8> {
         self.heading_levels.get(block).copied().flatten()
-    }
-
-    pub(super) fn prepare(source: &str, base: Option<&std::path::Path>) -> Self {
-        let mut outline = Self::parse(source);
-        // Rendering may substitute cached still images, but editing always uses
-        // byte ranges in the original source, never the rewritten preview text.
-        for (block, structure) in outline.blocks.iter_mut().zip(&mut outline.structures) {
-            if let Some(structure) = structure {
-                for part in &mut std::sync::Arc::make_mut(structure).parts {
-                    if let Some(image) = &part.image_reference {
-                        let key = identifier(&image.identifier);
-                        if let Some((url, _)) = outline.image_definitions.get(&key) {
-                            outline.image_targets.entry(key).or_insert_with(|| {
-                                super::images::flatten_local_image_url(url, base)
-                            });
-                        }
-                    }
-                    let source = &block[part.range.clone()];
-                    let preview = super::images::rewrite_doc_images(source, base);
-                    part.preview = (preview != source).then_some(preview);
-                }
-            } else {
-                *block = super::images::rewrite_doc_images(block, base);
-            }
-        }
-        for (definition, _) in outline.definitions.values_mut() {
-            *definition = super::images::rewrite_doc_images(definition, base);
-        }
-        outline
     }
 
     pub(super) fn block_source(&self, index: usize) -> String {
@@ -249,7 +219,7 @@ impl Outline {
             let key = identifier(&image.identifier);
             if let Some((url, title)) = self.image_definitions.get(&key) {
                 // 可见片段才展开地址，避免长 data URL 随全文的每次引用成倍常驻。
-                let target = self.image_targets.get(&key).unwrap_or(url);
+                let target = url;
                 return super::object_source::image_markdown(target, &image.alt, title.as_deref());
             }
         }

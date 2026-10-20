@@ -21,7 +21,8 @@ use gpui::http_client::{AsyncBody, HttpClient, Result as HttpResult, Url, anyhow
 
 /// 单张图片的响应体上限。gpui 会把 body 全量读进内存再解码，超大响应
 /// （错误配置的链接指向视频等）不该拖垮查看器。
-const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_RESPONSE_BYTES: u64 = super::image_decode::MAX_ENCODED_BYTES as u64;
+static FETCHES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
 pub struct UreqClient {
     executor: BackgroundExecutor,
@@ -110,7 +111,14 @@ fn first_frame_png(bytes: &[u8]) -> Vec<u8> {
 
 fn encode_png(bytes: &[u8]) -> Option<Vec<u8>> {
     use image::ImageEncoder as _;
-    let rgba = image::load_from_memory(bytes).ok()?.into_rgba8();
+    let format = image::guess_format(bytes).ok()?;
+    let rgba = super::image_decode::rgba(
+        bytes,
+        format,
+        super::image_decode::MAX_ENCODED_BYTES,
+        super::image_decode::MAX_DECODED_BYTES,
+    )
+    .ok()?;
     let mut out = Vec::new();
     image::codecs::png::PngEncoder::new(&mut out)
         .write_image(rgba.as_raw(), rgba.width(), rgba.height(), image::ExtendedColorType::Rgba8)
@@ -154,8 +162,15 @@ impl HttpClient for UreqClient {
             let mut request_bytes = Vec::new();
             body.read_to_end(&mut request_bytes).await?;
 
-            let (status, header_pairs, bytes) =
-                executor.spawn(async move { fetch_blocking(agent, parts, request_bytes) }).await?;
+            let permit = FETCHES.acquire().await.expect("image fetch admission never closes");
+            let (status, header_pairs, bytes) = executor
+                .spawn(async move {
+                    // A cancelled caller must not free admission while its blocking
+                    // network/decode work is still running.
+                    let _permit = permit;
+                    fetch_blocking(agent, parts, request_bytes)
+                })
+                .await?;
 
             let mut builder = gpui::http_client::http::Response::builder().status(status);
             for (name, value) in header_pairs {

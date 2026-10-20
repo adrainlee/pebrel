@@ -10,7 +10,6 @@ use std::sync::Arc;
 use gpui::RenderImage;
 use image::{Frame, ImageFormat};
 
-const MAX_IMAGE_PIXELS: u64 = 16 * 1024 * 1024;
 const MAX_IMAGE_ENCODED_BYTES: usize = 12 * 1024 * 1024;
 const MAX_IMAGE_DECODED_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CACHED_IMAGES: usize = 16;
@@ -194,39 +193,8 @@ fn decode_rgba(
     format: ImageFormat,
     encoded_limit: usize,
 ) -> Result<image::RgbaImage, String> {
-    if data.len() > encoded_limit {
-        return Err("encoded image exceeds its size limit".to_owned());
-    }
-
-    let (encoded_width, encoded_height) =
-        image::ImageReader::with_format(std::io::Cursor::new(data), format)
-            .into_dimensions()
-            .map_err(|error| format!("failed to read terminal image dimensions: {error}"))?;
-    let pixels = u64::from(encoded_width)
-        .checked_mul(u64::from(encoded_height))
-        .ok_or_else(|| "terminal image dimensions overflow".to_owned())?;
-    if pixels == 0 || pixels > MAX_IMAGE_PIXELS {
-        return Err("terminal image exceeds 16 megapixels".to_owned());
-    }
-    let decoded_bytes = usize::try_from(pixels.checked_mul(4).unwrap_or(u64::MAX))
-        .map_err(|_| "terminal image allocation size overflow".to_owned())?;
-    if decoded_bytes > MAX_IMAGE_DECODED_BYTES {
-        return Err("decoded terminal image exceeds 64 MiB".to_owned());
-    }
-
-    // Decode only the first frame and cap allocations before decoding.
-    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(data), format);
-    let mut limits = image::Limits::default();
-    limits.max_alloc = Some(MAX_IMAGE_DECODED_BYTES as u64);
-    reader.limits(limits);
-    let decoded =
-        reader.decode().map_err(|error| format!("failed to decode terminal image: {error}"))?;
-    let (actual_width, actual_height) = (decoded.width(), decoded.height());
-    if actual_width != encoded_width || actual_height != encoded_height {
-        return Err("terminal image dimensions changed while decoding".to_owned());
-    }
-
-    Ok(decoded.into_rgba8())
+    crate::gpui_shell::image_decode::rgba(data, format, encoded_limit, MAX_IMAGE_DECODED_BYTES)
+        .map_err(|error| format!("failed to decode terminal image: {error}"))
 }
 
 #[cfg(test)]

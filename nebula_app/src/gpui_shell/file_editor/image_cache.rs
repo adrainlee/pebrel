@@ -5,8 +5,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use gpui::{
-    App, AppContext, Asset, AssetLogger, Entity, EntityId, ImageAssetLoader, ImageCache,
-    ImageCacheError, RenderImage, Resource, Task, WeakEntity, Window,
+    App, AppContext, Entity, EntityId, ImageCache, ImageCacheError, RenderImage, Resource, Task,
+    WeakEntity, Window,
 };
 
 use crate::render_cache::RenderCache;
@@ -119,7 +119,7 @@ impl ImageCache for DocumentImageCache {
 
         // Call the loader directly: fetch_asset/use_asset would also retain its
         // completed result globally, defeating this owner's eviction policy.
-        let future = AssetLogger::<ImageAssetLoader>::load(resource.clone(), cx);
+        let future = super::image_loader::load(resource.clone(), self.byte_limit, cx);
         let background = cx.background_executor().spawn(future);
         let owner = self.owner.clone();
         let source = resource.clone();
@@ -294,5 +294,41 @@ mod tests {
         cx.run_until_parked();
         assert!(owner.upgrade().is_none());
         cx.update(|_, cx| assert!(!ImageSource::Resource(source).is_asset_cached(cx)));
+    }
+
+    #[gpui::test]
+    fn local_animation_is_one_bgra_frame_and_warm_load_needs_no_file(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let document = directory.path().join("image.md");
+        std::fs::write(&document, "![image](original.gif)").unwrap();
+        let path = directory.path().join("original.gif");
+        {
+            let mut encoder =
+                image::codecs::gif::GifEncoder::new(std::fs::File::create(&path).unwrap());
+            for color in [[255, 0, 0, 255], [0, 255, 0, 255]] {
+                encoder
+                    .encode_frame(image::Frame::new(image::RgbaImage::from_pixel(
+                        2,
+                        2,
+                        image::Rgba(color),
+                    )))
+                    .unwrap();
+            }
+        }
+        let (file, mut cx) = super::super::tests::open(document, cx);
+        let source = Resource::Path(Arc::from(path.clone()));
+        let cache = cx.update(|_, cx| DocumentImageCache::with_limits(file.entity_id(), 64, 8, cx));
+        cx.update(|window, cx| {
+            assert!(cache.update(cx, |cache, cx| cache.load(&source, window, cx)).is_none());
+        });
+        cx.run_until_parked();
+        std::fs::remove_file(&path).unwrap();
+        cx.update(|window, cx| {
+            let image =
+                cache.update(cx, |cache, cx| cache.load(&source, window, cx)).unwrap().unwrap();
+            assert_eq!(image.frame_count(), 1);
+            assert_eq!(image.as_bytes(0), Some([0, 0, 255, 255].repeat(4).as_slice()));
+            assert!(cache.read(cx).loading.is_empty());
+        });
     }
 }
