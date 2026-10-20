@@ -475,6 +475,9 @@ struct PanelSnapshot {
     root: PathBuf,
     /// Files 快照所属的来宾位置；避免两个发行版恰好同为 `/home` 时串结果。
     files_wsl: Option<crate::shell_detect::WslCwd>,
+    /// Expansion state used to enumerate rows; a late VCS result must not undo
+    /// directory toggles performed after enumeration started.
+    expanded: HashSet<PathBuf>,
     rows: Vec<FileRow>,
     /// 这次枚举是否全部成功。WSL 冷启动可能耗尽预算被 kill，那时 `rows` 是空的
     /// 但**不代表目录是空的**——UI 必须能区分，否则会把"读不到"说成"此目录为空"。
@@ -708,11 +711,13 @@ impl SidePanel {
             self.needs_refresh = true;
             return false;
         }
-        self.tree_rows = snapshot.rows;
-        if self.search.trim().is_empty() {
-            self.rows.clone_from(&self.tree_rows);
+        if self.expanded == snapshot.expanded {
+            self.tree_rows = snapshot.rows;
+            if self.search.trim().is_empty() {
+                self.rows.clone_from(&self.tree_rows);
+            }
+            self.enumeration_failed = !snapshot.enumeration_ok;
         }
-        self.enumeration_failed = !snapshot.enumeration_ok;
         if let Some(git) = snapshot.git {
             self.git = git.map(std::sync::Arc::new);
         }
@@ -969,6 +974,7 @@ impl SidePanel {
                 *slot = Some(PanelSnapshot {
                     root: root.clone(),
                     files_wsl: files_wsl.clone(),
+                    expanded: expanded.clone(),
                     rows: rows.clone(),
                     enumeration_ok,
                     git: None,
@@ -1006,8 +1012,14 @@ impl SidePanel {
                 },
             };
             if let Ok(mut slot) = slot.lock() {
-                *slot =
-                    Some(PanelSnapshot { root, files_wsl, rows, enumeration_ok, git: Some(git) });
+                *slot = Some(PanelSnapshot {
+                    root,
+                    files_wsl,
+                    expanded,
+                    rows,
+                    enumeration_ok,
+                    git: Some(git),
+                });
             }
         });
     }

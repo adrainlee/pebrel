@@ -276,6 +276,39 @@ mod tests {
     }
 
     #[test]
+    fn late_snapshots_keep_new_expansions_while_updating_git() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().to_path_buf();
+        let child = root.join("directory");
+        std::fs::create_dir(&child).unwrap();
+        std::fs::write(child.join("child.txt"), "fixture").unwrap();
+        let mut panel = SidePanel::new();
+        panel.root = Some(root.clone());
+        let collapsed = SidePanel::tree_rows(&root, &HashSet::new());
+        panel.tree_rows = collapsed.clone();
+        panel.rows = collapsed.clone();
+        let index = panel.rows.iter().position(|row| row.path == child).unwrap();
+        panel.click_row(index);
+        assert!(panel.expanded.contains(&child));
+        assert!(panel.rows.iter().any(|row| row.name == "child.txt"));
+        for git in [None, Some(Some(GitInfo { branch: "ready".into(), ..Default::default() }))] {
+            *panel.snapshot_slot.lock().unwrap() = Some(PanelSnapshot {
+                root: root.clone(),
+                files_wsl: None,
+                expanded: HashSet::new(),
+                rows: collapsed.clone(),
+                enumeration_ok: false,
+                git,
+            });
+            assert!(panel.harvest_snapshot());
+            assert!(panel.rows.iter().any(|row| row.name == "child.txt"));
+            assert!(panel.tree_rows.iter().any(|row| row.name == "child.txt"));
+            assert!(!panel.enumeration_failed);
+        }
+        assert_eq!(panel.git().map(|git| git.branch.as_str()), Some("ready"));
+    }
+
+    #[test]
     fn partial_file_snapshot_keeps_vcs_until_the_final_snapshot() {
         let located =
             crate::shell_detect::WslCwd { distro: "Debian".to_owned(), guest: "/".to_owned() };
@@ -292,6 +325,7 @@ mod tests {
         *panel.snapshot_slot.lock().unwrap() = Some(PanelSnapshot {
             root: root.clone(),
             files_wsl: Some(located.clone()),
+            expanded: HashSet::new(),
             rows: Vec::new(),
             enumeration_ok: true,
             git: None,
@@ -302,6 +336,7 @@ mod tests {
         *panel.snapshot_slot.lock().unwrap() = Some(PanelSnapshot {
             root,
             files_wsl: Some(located),
+            expanded: HashSet::new(),
             rows: Vec::new(),
             enumeration_ok: true,
             git: Some(None),
